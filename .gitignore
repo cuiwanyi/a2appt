@@ -1,0 +1,54 @@
+# === 密钥与本地环境 ===
+.env
+.env.*
+!.env.example
+
+# === 生成内容（本地保留，不上传） ===
+workspace/
+studio/runs/
+runs/
+output/
+outputs/
+dist/
+build/
+*.pptx
+*.ppt
+*.pdf
+~$*
+
+# === 测试 / 调试脚本与输入样例（本地保留，不上传） ===
+test_*.py
+*_test.py
+selftest.py
+review_candidate.py
+pick_assets.py
+rebuild_run.py
+studio/test_server.py
+examples/
+my_brief.json
+my_request.txt
+*需求*.txt
+*提示词*.txt
+make_ppt.bat
+run_demo.bat
+
+# === Python 缓存与虚拟环境 ===
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === 编辑器 / 本地工具状态 ===
+.idea/
+.vscode/
+.slidep/
+.workbuddy/
+*.swp
+.DS_Store
+Thumbs.db
+
+# === 日志 ===
+*.log
