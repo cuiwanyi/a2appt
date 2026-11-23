@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from io import BytesIO
 from pathlib import Path
 
@@ -14,6 +15,17 @@ def text_only(spec):
     text = '；'.join(str(spec.get(k) or '') for k in ('creative', 'style'))
     return spec.get('layout_recipe') == 'pure_type' or bool(re.search(
         r'(?<!非)(?<!不做)(?<!不是)(?<!不要)(?:纯文字|纯文本|零图片|无配图|不要配图|不放图片|无图(?!标|案|片背景))', text))
+
+
+_ZONE = r'(?:横幅|横条|图片区|照片区|侧栏|[上下左右]半[部页区幅]|(?:顶部|底部|上部|下部)(?:区域|图带)|卡片(?:内|中|底部|上部|下部)?)'
+_PHOTO = r'(?:摄影|照片|实拍|背景图)'
+_LOCAL_PHOTO = re.compile(_ZONE + r'(?:\s*[，,：:]\s*(?=采用|使用|用|放置|配))?[^，,。；;：:\n→]{0,20}?' + _PHOTO + r'(?:背景|铺底)?|' +
+                          _PHOTO + r'(?:背景|仅|只|位于|用于|放在|置于|铺在|限于|的|作为)*' + _ZONE)
+
+
+def _local_clause(spec):
+    text = '；'.join(str(spec.get(k) or '') for k in ('creative', 'style'))
+    return _LOCAL_PHOTO.search(text)
 
 
 def full_bleed_rule(spec):
@@ -31,14 +43,84 @@ def full_bleed_rule(spec):
     extent = r'(?:满幅|全幅|满版|整页|铺满四边|铺满全页)'
     if re.search(r'(?:不用|不要|无需|禁止|不使用|不做)(?:满幅|整页)?(?:摄影背景|照片背景|背景图)|(?:摄影背景|满幅摄影)(?:不适用|除外)', creative):
         return False
+    # “摄影背景”只有未被横幅/局部区域限定时，才是页级指令；独立的整页要求仍有效。
+    local = _local_clause(spec)
+    if local:
+        creative = _LOCAL_PHOTO.sub('局部区域', creative)
     if re.search(r'(?:摄影|照片)(?:背景|铺底)|整页[^；。，]{0,12}(?:摄影|全景)', creative):
         return True
     if re.search(photo + r'(?:背景|连续|等比裁切|必须|需|要|为|应|采用|，)*' + extent + '|' +
                  extent + r'(?:用一张|用|主|连续|完整|的)*' + photo, creative):
         return True
-    if re.search(r'(?<!不)(?<!禁止)(?:可以|可|允许|采用|改为)(?:独立)?分栏', creative):
+    if local or re.search(r'(?<!不)(?<!禁止)(?:可以|可|允许|采用|改为)(?:独立)?分栏', creative):
         return False
     return None
+
+
+def localize_photo(page, spec, index, vi, request_box):
+    """把仅服务于局部区域的页背景还原为图片；不改已有横幅、条目图或遮罩。"""
+    local = _local_clause(spec)
+    bg = page['bg']
+    if not local or bg['type'] != 'image':
+        return
+    import config
+    from .schema import _normalize_element
+
+    width, height = config.SLIDE_W_IN, config.SLIDE_H_IN
+    text = local.string
+    # 像素范围必须紧邻本块说明，并有参考画布；不能借用日期栏、卡片等其它块的坐标。
+    canvas = re.search(r'(\d{2,5})\s*[×xX*]\s*(\d{2,5})\s*(?:像素|px)', text, re.I)
+    bounds = re.search(r'x\s*=\s*(\d+)\s*[-–—~至]\s*(\d+)\s*[,，、\s]+y\s*=\s*(\d+)\s*[-–—~至]\s*(\d+)[^，,；;。\n=]{0,12}$',
+                       text[:local.start()], re.I)
+    box = None
+    if canvas and bounds:
+        cw, ch = map(int, canvas.groups())
+        l, r, t, b = map(int, bounds.groups())
+        if 0 <= l < r <= cw and 0 <= t < b <= ch and (r-l < cw or b-t < ch):
+            box = dict(x=l/cw*width, y=t/ch*height, w=(r-l)/cw*width, h=(b-t)/ch*height)
+
+    photos = [e for e in page['elements'] if e['type'] in ('picture', 'mask_picture')
+              and not e.get('item_key') and e.get('layer') in ('picture', 'bg')]
+
+    def matches(p):
+        # 允许模型的四舍五入及小幅内缩，但不能把覆盖全页的框或图标误当横幅。
+        return all(abs(p[k] - box[k]) <= max(.035, box[d]*.08)
+                   for k, d in (('x','w'), ('w','w'), ('y','h'), ('h','h')))
+
+    if box is None and '横幅' in local.group():
+        banners = [e['position'] for e in photos if e['position']['w'] >= .7*width
+                   and .08*height <= e['position']['h'] <= .6*height
+                   and re.search(_PHOTO, e.get('content', ''))]
+        if len(banners) == 1:
+            box = banners[0]
+
+    subject = bg.get('subject') or spec.get('subject') or spec.get('visual')
+    if box is None:
+        # 一次有界返修只索取主图框及拍摄内容，不让模型重排整页。失败保留原输入并报错。
+        plan = request_box('只确定指定局部摄影的图片框，不改其余版式。输出 JSON 对象，position 含 x,y,w,h（英寸），'
+                           'subject 仅为无文字摄影内容。',
+                           f'画布 {width}×{height} 英寸。局部要求：{local.group()}。本页构图：{text}。'
+                           f'现有局部图片（若对应则采用原框）：{[(e["position"], e["content"]) for e in photos]}')
+        p = plan.get('position') if isinstance(plan, dict) else None
+        if not isinstance(p, dict) or not all(type(p.get(k)) in (int, float) for k in ('x','y','w','h')):
+            raise ValueError(f'第{index+1}页局部摄影缺少有效位置，未删除主摄影')
+        if not (0 <= p['x'] < p['x']+p['w'] <= width+.001 and 0 <= p['y'] < p['y']+p['h'] <= height+.001
+                and (p['w'] < width*.97 or p['h'] < height*.97)):
+            raise ValueError(f'第{index+1}页局部摄影位置越界或仍为整页，未删除主摄影')
+        box = {k:p[k] for k in ('x','y','w','h')}
+        subject = subject or plan.get('subject')
+
+    if not any(matches(e['position']) for e in photos):
+        # 原 bg ID 与拍摄说明转移到普通图片，素材申请不会再丢主摄影或重复申请一张背景。
+        # 一块摄影说明可能跨多个分号（例如先写场景，再写人物）；不吞入下一分区。
+        section = re.split(r'[①-⑳\n]|[。；;]\s*(?:[xy]\s*=|(?:下方|底部|下半部)?(?:卡片区|分隔区))',
+                           text[local.start():], maxsplit=1)[0].strip('；。')
+        el = _normalize_element(dict(type='picture', position=box, asset_id=bg['image'],
+                                     content=subject or f'仅绘制此区域的无字摄影，不绘制文字及版式：{section}'),
+                                len(page['elements']), index, vi)
+        page['elements'].insert(0, el)
+        page['elements'].sort(key=lambda e: e['z'])
+    page['bg'] = dict(type='color', color=bg['color'], image=None)
 
 
 def photo_spec(brief, index):

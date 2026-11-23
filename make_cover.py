@@ -149,14 +149,13 @@ def cmd_apply(args) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="封面艺术字生成 + 人工挑图")
-    sub = ap.add_subparsers(dest="cmd")
+    ap = argparse.ArgumentParser(description="专用艺术字命令：生成整页位图封面，标题不可双击编辑")
     g = ap.add_argument_group("生成候选")
     g.add_argument("--title", default="", help="封面主标题（逐字写入艺术字）")
     g.add_argument("--subtitle", default="", help="副标题/信息层级")
     g.add_argument("--brand", default="", help="公司/机构名")
     g.add_argument("--style", default="3d_gradient",
-                   choices=["calligraphy", "3d_gradient", "minimal_serif"])
+                   choices=tuple(STYLE_LABELS))
     g.add_argument("--n", type=int, default=3, help="候选数")
     g.add_argument("--mock", action="store_true", help="离线占位图，验证流程用")
     a = ap.add_argument_group("应用挑图")

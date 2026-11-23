@@ -16,6 +16,7 @@ from pptx.oxml.ns import qn
 
 import config
 from .schema import vi_palette
+from .toc_policy import missing_contents
 
 
 def _luminance(hex_color: str) -> float:
@@ -61,7 +62,7 @@ def _check(name: str, ok: bool, detail: str, blocking: bool = True) -> dict:
     return {"check": name, "ok": ok, "blocking": blocking, "detail": detail}
 
 
-def inspect(pptx_path: str | Path, layout: dict, attempt: int = 1) -> dict:
+def inspect(pptx_path: str | Path, layout: dict, attempt: int = 1, *, brief: dict | None = None) -> dict:
     path = Path(pptx_path)
     prs = Presentation(str(path))
     sw, sh = prs.slide_width, prs.slide_height
@@ -259,18 +260,8 @@ def inspect(pptx_path: str | Path, layout: dict, attempt: int = 1) -> dict:
     # 以下为「画册级」（>=4页）硬规则；单页/少页的轻量 PPT 不受这些约束
     # 注意：这些规则由 agents/reviewer.py 的 enforce_brochure_rules() 在真实流水线里
     # 单独强制（驱动返修）；inspect() 层默认只记录为 warning，避免合成测试/重建脚本被误伤。
-    _brochure_rules = []  # (issue_text)
+    _brochure_rules = missing_contents(layout, brief)
     if n_pages >= 4:
-        # 1) 多页应有目录页（toc 原语或页名含「目录」）
-        has_toc = any(
-            any(el["type"] == "toc" for el in pg.get("elements", []))
-            or "目录" in pg.get("page_name", "")
-            for pg in pages
-        )
-        if not has_toc:
-            _brochure_rules.append(
-                "整deck缺目录页：>=4页应在第2页用 toc 原语（编号+章节名+说明）做目录"
-            )
 
         # 2) 封面应为摄影背景+渐变遮罩（不应是纯色大色块）
         cover = pages[0]
@@ -320,25 +311,16 @@ def inspect(pptx_path: str | Path, layout: dict, attempt: int = 1) -> dict:
     return report
 
 
-def brochure_rule_issues(layout: dict) -> list[str]:
+def brochure_rule_issues(layout: dict, brief: dict | None = None) -> list[str]:
     """画册级（>=4页）硬规则违规项，供真实流水线在 Reviewer 阶段驱动返修。
 
     与 inspect() 的 warning 版不同，这里返回阻塞级问题；仅由 agents/reviewer.py
     在非 mock 模式下调用，合成测试与重建脚本不触发。
     """
-    issues: list[str] = []
+    issues = missing_contents(layout, brief)
     pages = layout.get("pages", [])
     if len(pages) < 4:
         return issues
-
-    has_toc = any(
-        any(el.get("type") == "toc" for el in pg.get("elements", []))
-        or "目录" in str(pg.get("page_name", ""))
-        for pg in pages
-    )
-    if not has_toc:
-        issues.append("整deck缺目录页：第2页需用 toc 原语做编号目录（编号+章节名+说明）。"
-                      "请在第2页放一个 type=toc 元素，items 给出6~8个章节，配 bg.image + scrim。")
 
     cover = pages[0]
     legacy_cover = not any(e.get('type') == 'scrim' for e in cover.get('elements', []))

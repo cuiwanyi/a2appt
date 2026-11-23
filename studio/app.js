@@ -10,7 +10,7 @@
   function node(tag, text, cls) { const n = document.createElement(tag); if (text != null) n.textContent = text; if (cls) n.className = cls; return n; }
   function msg(id, text = '') { const n = $(id); n.textContent = text; n.hidden = !text; }
   function url(raw) { if (typeof raw !== 'string' || !raw.trim()) return ''; try { const u = new URL(raw, document.baseURI); return /^https?:$/.test(u.protocol) && u.origin === location.origin && !u.username && !u.password ? u.href : ''; } catch { return ''; } }
-  function badge(n, status) { n.className = 'badge' + (labels.has(status) ? ' ' + status : ''); n.textContent = labels.get(status) || '状态未知'; }
+  function badge(n, status, draftReady) { n.className = 'badge' + (labels.has(status) ? ' ' + status : ''); n.textContent = draftReady && ['active','partial'].includes(status) ? '首稿待审核' : labels.get(status) || '状态未知'; }
   function date(seconds) { const t = new Date(Number(seconds) * 1000); return seconds && Number.isFinite(t.getTime()) ? dateFmt.format(t) : '—'; }
   function pages(r) { return Number.isInteger(r.pages) && r.pages > 0 ? r.pages + ' 页' : '页数待定'; }
   function cover(img, src, alt, fallback) {
@@ -39,7 +39,7 @@
     const idx = featured.findIndex(r => r.id === heroId), r = featured[idx];
     $('hero-count').textContent = `${idx+1} / ${featured.length}`; $('folio-no').textContent = 'NO. ' + (r ? String(idx+1).padStart(2,'0') : '—');
     $('hero-prev').disabled = $('hero-next').disabled = featured.length < 2;
-    $('hero-status').hidden = !r; if (r) badge($('hero-status'), r.status);
+    $('hero-status').hidden = !r; if (r) badge($('hero-status'), r.status, r.draftReady);
     $('hero-title').textContent = r ? r.title || '未命名演示' : hasList ? '留给下一份好作品' : '暂时无法读取作品';
     $('hero-meta').textContent = r ? [r.brand || '未标注品牌',pages(r),date(r.updated)].join(' · ') : hasList ? '新建一份演示，从简报开始。' : '请检查连接后刷新工作台。';
     $('hero-open').disabled = !r; cover($('hero-image'), url(r?.cover), r ? (r.title || '作品') + '封面' : '');
@@ -58,7 +58,7 @@
       const project = node('span',null,'project'), thumb = node('span','F.','thumb'), names = node('div'); thumb.setAttribute('aria-hidden','true');
       if (url(r.cover)) { const image = node('img'); image.loading = 'lazy'; cover(image,url(r.cover),''); thumb.append(image); }
       names.append(node('strong',r.title || '未命名演示'),node('small',[r.brand,r.source === 'history' ? '历史导入' : r.source === 'cli' ? '命令行' : '工作台'].filter(Boolean).join(' · '))); project.append(thumb,names);
-      const state = node('span'); badge(state,r.status); const icon = document.createElementNS(ns,'svg'), use = document.createElementNS(ns,'use'); use.setAttribute('href','#i-arrow'); icon.append(use); icon.setAttribute('aria-hidden','true');
+      const state = node('span'); badge(state,r.status,r.draftReady); const icon = document.createElementNS(ns,'svg'), use = document.createElementNS(ns,'use'); use.setAttribute('href','#i-arrow'); icon.append(use); icon.setAttribute('aria-hidden','true');
       row.append(project,node('span',pages(r),'cell'),node('span',date(r.updated),'cell'),state,icon); row.onclick = () => openDetail(r.id); fragment.append(row); if (row.dataset.id === focused) nextFocus = row;
     }
     $('rows').replaceChildren(fragment); nextFocus?.focus({preventScroll:true});
@@ -75,8 +75,9 @@
     finally { listBusy = false; $('refresh').removeAttribute('aria-busy'); renderHero(); renderList(); }
   }
   $('query').oninput = $('status').onchange = renderList; $('refresh').onclick = refreshList;
+  let viewFirstDraft = false;
   function drawPage() {
-    const pics = Array.isArray(data?.previews) ? data.previews : []; page = Math.max(0,Math.min(page,pics.length-1));
+    const pics = (viewFirstDraft ? data?.draftPreviews : data?.previews) || []; page = Math.max(0,Math.min(page,pics.length-1));
     $('slide-count').textContent = (pics.length ? page+1 : 0) + ' / ' + pics.length;
     $('slide-prev').disabled = !page; $('slide-next').disabled = page+1 >= pics.length;
     const src = url(pics[page]), fallback = $('slide-empty');
@@ -85,12 +86,16 @@
   }
   function drawDetail() {
     const d = data; $('detail-title').textContent = d.title || '未命名演示'; $('detail-meta').textContent = [d.brand, labels.get(d.status),pages(d),date(d.updated),d.id].filter(Boolean).join(' · ');
-    $('preview-kind').textContent = d.previewKind ? '预览 / ' + d.previewKind : '页面预览'; drawPage();
+    $('switch-preview').hidden = !d.draftPreviews?.length || d.showingDraft;
+    $('switch-preview').textContent = viewFirstDraft ? '查看最新预览' : '查看首稿';
+    $('preview-kind').textContent = viewFirstDraft ? '首稿（待审核）· 近似版式预览' : d.previewKind || '页面预览'; drawPage();
     const stages = Array.isArray(d.stages) ? d.stages : [], issues = Array.isArray(d.issues) ? d.issues : [];
     $('stages').replaceChildren(...(stages.length ? stages.map(s => node('li',(s.done ? '已完成 · ' : '待完成 · ') + s.label,s.done ? 'done' : '')) : [node('li','尚无阶段记录')]));
     $('issues').replaceChildren(...(issues.length ? issues.map(s => node('li','— ' + s)) : [node('li','暂无审查问题记录')]));
     $('brief-view').textContent = Object.keys(d.brief || {}).length ? JSON.stringify(d.brief,null,2) : '等待简报生成。'; $('download').textContent = d.status === 'failed' ? '下载候选稿' : '下载 PPTX';
-    const link = url(d.download); $('download').hidden = !link; $('no-download').hidden = !!link;
+    const draftLink = url(d.draftDownload); $('draft-download').hidden = !draftLink;
+    if (draftLink) $('draft-download').href = draftLink; else $('draft-download').removeAttribute('href');
+    const link = url(d.download); $('download').hidden = !link; $('no-download').hidden = !!(link || draftLink);
     if (link) $('download').href = link; else $('download').removeAttribute('href'); $('rebuild').disabled = !d.canRebuild || posting; $('detail-body').hidden = false;
   }
   async function refreshDetail() {
@@ -101,8 +106,9 @@
     } catch (e) { if (token === seq) { msg('detail-error','详情读取失败：' + e.message); if (!data) $('detail-meta').textContent = '未取得作品详情'; $('detail-retry').hidden = false; } }
     finally { if (token === seq) detailBusy = false; }
   }
-  function openDetail(id) { if (!id) return; seq++; detailBusy = false; selected = id; data = null; page = 0; cover($('slide'),'',''); $('detail-body').hidden = true; $('detail-retry').hidden = true; msg('detail-error'); $('detail-title').textContent = runs.find(r => r.id === id)?.title || '作品详情'; $('detail-meta').textContent = '正在读取详情…'; if (!$('detail').open) $('detail').showModal(); refreshDetail(); }
+  function openDetail(id) { if (!id) return; seq++; detailBusy = false; selected = id; data = null; page = 0; viewFirstDraft = false; cover($('slide'),'',''); $('detail-body').hidden = true; $('detail-retry').hidden = true; msg('detail-error'); $('detail-title').textContent = runs.find(r => r.id === id)?.title || '作品详情'; $('detail-meta').textContent = '正在读取详情…'; if (!$('detail').open) $('detail').showModal(); refreshDetail(); }
   $('detail').addEventListener('close',() => { selected = data = null; seq++; detailBusy = false; }); $('detail-retry').onclick = refreshDetail;
+  $('switch-preview').onclick = () => { viewFirstDraft = !viewFirstDraft; page = 0; drawDetail(); };
   function turn(delta) { page += delta; drawPage(); } $('slide-prev').onclick = () => turn(-1); $('slide-next').onclick = () => turn(1);
   for (const b of document.querySelectorAll('[data-close]')) b.onclick = () => { if (!posting) b.closest('dialog').close(); };
   for (const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('cancel',e => { if (posting) e.preventDefault(); });
@@ -130,6 +136,8 @@
     if ($('detail').open && data && ['ArrowLeft','ArrowRight'].includes(e.key)) { e.preventDefault(); turn(e.key === 'ArrowLeft' ? -1 : 1); }
     else if (e.key === '/' && !document.querySelector('dialog[open]')) { e.preventDefault(); $('query').focus(); }
   });
-  function tick() { if (!document.hidden && !posting) { refreshList(); if ($('detail').open && (!data || ['active','partial'].includes(data.status))) refreshDetail(); } }
-  document.addEventListener('visibilitychange',tick); setInterval(tick,10000); refreshList();
+  function pollDetail() { if (!document.hidden && !posting && $('detail').open && (!data || ['active','partial'].includes(data.status))) refreshDetail(); }
+  function pollList() { if (!document.hidden && !posting) refreshList(); }
+  document.addEventListener('visibilitychange',() => { pollDetail(); pollList(); });
+  setInterval(pollDetail,2000); setInterval(pollList,10000); refreshList();
 })();

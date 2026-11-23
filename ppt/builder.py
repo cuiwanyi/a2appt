@@ -98,6 +98,8 @@ class PPTBuilder:
     # ------------------------------------------------------------ 元素级工具
     def set_page_context(self, page: dict, spec: dict | None = None) -> None:
         """缓存当前页的 scrim 洗白方向，供 toc 等原语把内容收进洗白侧。"""
+        from .badge_layers import protect_badge_layers
+        protect_badge_layers(page)
         self._page_texts = {e.get("content", "").strip() for e in page.get("elements", [])
                             if e.get("type") == "text"}
         self._page = page
@@ -288,7 +290,8 @@ class PPTBuilder:
         # 等比裁切：图片原始比例与元素框不一致时，居中裁掉多余部分再放入，
         # 绝不拉伸变形（用户明确要求「图片不能压缩」）。透明艺术字 PNG 跳过，
         # 它的框已按真实宽高比算好，裁切会破坏笔锋。
-        if p["w"] > 0 and p["h"] > 0:
+        x, y, w, h = (p[k] for k in ("x", "y", "w", "h"))
+        if w > 0 and h > 0:
             from PIL import Image
             from .focus_scrim import cover_crop
             target = p["w"] / p["h"]
@@ -297,12 +300,17 @@ class PPTBuilder:
                 has_alpha = im.mode in {"RGBA", "LA"} or (
                     im.mode == "P" and "transparency" in im.info
                 )
-            if not has_alpha and abs(cur - target) / target > 0.02:
+            if has_alpha and abs(cur - target) / target > 0.02:
+                # 透明素材完整等比居中，不能把宽幅 PNG 的圆环强行拉进正方框。
+                fit_w, fit_h = min(w, h * cur), min(h, w / cur)
+                x, y = x + (w - fit_w) / 2, y + (h - fit_h) / 2
+                w, h = fit_w, fit_h
+            elif not has_alpha and abs(cur - target) / target > 0.02:
                 cropped = self._scrim_dir / f"crop_{el['element_id']}.png"
                 cover_crop(path, cropped, target)
                 path = str(cropped)
         shp = slide.shapes.add_picture(
-            str(path), Inches(p["x"]), Inches(p["y"]), Inches(p["w"]), Inches(p["h"])
+            str(path), Inches(x), Inches(y), Inches(w), Inches(h)
         )
         shp.name = el["element_id"]
         return [shp]

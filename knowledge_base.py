@@ -150,34 +150,45 @@ def select_master(hint: str, *, active_only: bool = True,
     return None
 
 
-def select_master_for_single(content_hint: str, *,
-                             version: str | None = None) -> dict[str, Any] | None:
-    """单页专用选母版:只按内容语义,绝不用'第1页/最后一页'的位置默认。
+def select_master_for_short(content_hint: str, *, total_pages: int = 1,
+                            version: str | None = None) -> dict[str, Any] | None:
+    """少页(<4)专用选母版:只按内容语义,绝不用'第1页/最后一页'的位置默认。
 
-    总页数=1 时不存在首页/末页概念。这里把内容语义分成四类:
-      - 致谢/告别/问答 -> 20_qa
-      - 目录            -> 02_contents
-      - 明确声明封面    -> 01_cover
+    总页数<4 属轻量 PPT,不套画册三段式。内容语义分四类:
+      - 明确声明封面    -> 01_cover(仅当用户明说这是封面/扉页)
+      - 目录            -> 02_contents(仅当用户明确要目录)
+      - 致谢/告别/问答  -> 20_qa
       - 其余内容        -> 走通用 select_master(内容母版)
-    内容语义不足以判断时返回 None,由调用方向用户确认,不擅自当封面。
+    不预设'封面+致谢'组合,不因某页在末位就判致谢,不自动放目录。
+    语义不足以判断时返回 None,由调用方向用户确认,不擅自当封面。
     """
+    if total_pages >= 4:
+        raise ValueError("select_master_for_short 只用于总页数<4;多页请用 select_master")
     h = _norm(content_hint)
     if not h:
         return None
-    # 目录优先于致谢:目录文案里可能出现"谢谢"等词,先判结构信号
+    # 先判明确声明的封面(避免"封面设计"这类词被目录/致谢信号抢先)
+    if any(_norm(s) in h for s in ("这是封面", "封面页", "做一页封面", "扉页", "cover page")):
+        return get_master("01_cover", version)
+    # 再判目录:仅当明确要目录
     if any(_norm(s) in h for s in ("目录", "contents", "章节一览", "章节导览")):
         return get_master("02_contents", version)
+    # 致谢/告别/问答
     if any(_norm(s) in h for s in (
             "致谢", "感谢观看", "谢谢观看", "thanks", "明天见", "下次见",
             "再会", "敬请期待", "q&a", "qa", "问答")):
         return get_master("20_qa", version)
-    if any(_norm(s) in h for s in ("这是封面", "封面页", "做一页封面", "扉页", "cover page")):
-        return get_master("01_cover", version)
-    # 其余按内容语义选,但排除封面(单页无声明不默认封面)
+    # 其余按内容语义选,但排除封面(少页无声明不默认封面)
     m = select_master(content_hint, active_only=True, version=version)
     if m and m["id"] == "01_cover":
         return None  # 语义不足,不擅自当封面
     return m
+
+
+def select_master_for_single(content_hint: str, *,
+                             version: str | None = None) -> dict[str, Any] | None:
+    """单页兼容入口,等价于 select_master_for_short(total_pages=1)。"""
+    return select_master_for_short(content_hint, total_pages=1, version=version)
 
 
 def orchestration_hint(version: str | None = None, *,

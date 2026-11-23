@@ -52,7 +52,7 @@ LAYOUT_CONTRACT = r"""
   {"type":"scrim","wash":"left|right|top|bottom|bottomleft|bottomright|topleft|topright",
    "color":"#FFFFFF","strength":0.94,"position":{"x":0,"y":0,"w":13.333,"h":7.5},"layer":"mask"}
   wash = 洗白哪一侧（文字放该侧，图片焦点在相反侧保持清晰）。
-- toc（目录页，整套>=4页时第2页用）：
+- toc（仅在本页承担目录功能时使用，不按页数或页码自动添加）：
   {"type":"toc","title":"目录","cols":2,"wash":"left|right|...（与该页 scrim 的 wash 一致）",
    "items":[{"num":"01","label":"章节名","desc":"一句话说明"}],
    "position":{"x":0.8,"y":1.2,"w":11.7,"h":5.6},"layer":"text"}
@@ -62,7 +62,7 @@ LAYOUT_CONTRACT = r"""
 - text 必须给 font{family,weight,color,size} 与 align(left|center|right)；禁止把文字写进图片。
 - shape.shape: rect | round_rect | oval | line | triangle | chevron | hexagon |
   diamond | parallelogram | trapezoid；fill/line 为 #RRGGBB 或 null。
-- picture: 独立图片图层，给 asset_id 与 content（素材需求描述）。逐项配图时，每幅 picture 与对应的一个行标题 text 必填同一 item_key，各行键不同。每个 asset_id 独立于背景及其他项；content 只写该条的可见主体与画法，不要写整页构图、系列数量或其他条目。返修保留行键与素材 ID。
+- picture: 独立图片图层，给 asset_id 与 content（素材需求描述）。独立品牌徽标须设 asset_kind="emblem"，content 只写本图的图案、轮廓、配色与画法，不得写页名、周边内容或整页排版。逐项配图时，每幅 picture 与对应的一个行标题 text 必填同一 item_key，各行键不同。每个 asset_id 独立于背景及其他项；content 只写该条的可见主体与画法，不要写整页构图、系列数量或其他条目。返修保留行键与素材 ID。
 - decorate.primitive: ring | dashed_line | line | diagonal_bar | dot_grid；
   由原生矢量形状绘制，可改色改描边，不要生成位图。
 - branch（可选原语，仅当本页内容本身就是「一个主句 + 几个分支」时用）：
@@ -74,6 +74,7 @@ LAYOUT_CONTRACT = r"""
   分支图示是原生矢量形状（双击可改、不依赖生图），所有分支文字由 items 提供，
   不要为分支单独配图；一页里通常只需 1 个 branch 元素表达全部分支。
 - 满幅摄影叠加多幅逐项小图时，bg.subject 只描述主照片的镜头、环境、可见主体和具体动作；不要把步骤列表、器具清单、整页创意或文案塞入 bg.subject。小图各写入对应 picture.content；程序按每个文字框的实际坐标为两翼、底部结语和页码生成禁入区，主摄影中的高纹理器物不得侵入，返修时只改主摄影，不覆盖独立小图或改文案。
+- 区分画布范围和照片范围：“幻灯片铺满画布／正面平视”不意味着照片铺满整页。仅在用户要求整页摄影时将主摄影放入 bg.image；指定横幅、栏、卡片等局部区域时按该区域坐标创建 picture，用 picture.content 写主体和动作，页面底色独立保留。局部渐隐、波浪与遮罩不得扩到整页。
 - 摄影背景 bg.subject 必填，用具体可拍摄的主体和场景解释本页，而不是复述行业。空间页拍空间、座位与长桌，到店页拍门面或入口，不用通用产品静物代替。
 - 所有颜色只能取自本次给定的 VI 主色/辅助色/强调色，外加黑 #000000 / 白 #FFFFFF。
 - pages[].decorations[] 可为空数组；装饰也可以直接写进 elements[]。
@@ -124,12 +125,12 @@ PRIMITIVE_CATALOG = """可用版式原语（按 brief 自由组合，不需要�
    - 配套的背景图素材 content 必须写清焦点方位，例如「主体/建筑/产品位于画面右侧三分之一，
      左侧大面积浅色留白，前景清晰锐利」，这样遮罩洗左侧不会毁掉右侧焦点。
 
-2) 目录页（整套 >= 4 页时，第 2 页必须是目录页）：
-   - 用 1 个 toc 元素 + bg.image + scrim（wash 与目录文字侧一致）；
+2) 仅当本页承担目录功能时采用下列规则。不按总页数或第二页的位置添加目录，不替换已指定的正文页；用户明确不要目录时不得添加：
+   - 多页导航目录用 1 个 toc 元素；背景与摄影范围遵守本页需求，不因目录而设置 bg.image。仅在文字压在整页摄影上时使用相应 scrim；
    - toc 字段：{"type":"toc","title":"目录","cols":2或3,"items":[
        {"num":"01","label":"章节名（<=10字）","desc":"一句话说明（<=30字）"}, ...],
        "position":{...},"layer":"text"}；
-   - items 必须逐项对应目录之后实际存在的页面，不含封面和目录，不预设条数，顺序与后文一致；不要用普通 text 手搓目录。
+   - 多页导航的 items 对应后续真实页，不含封面和目录，顺序与后文一致。单独交付的目录样页不是整册导航，不创建虚构页面或因无后续页而删除文案；用户指定卡片式版面时，每项标题、编号及副标题用原生 text，图片独立。
 
 3) 历程/发展史页（文案在讲阶段、年份、成长、roadmap 时）：
    - 用 1 个 branch timeline 元素；【每个节点的 desc 必须具体写清「这一阶段做了什么、
@@ -174,13 +175,21 @@ PLANNER_SYSTEM = """你是广告宣传PPT的版式规划师。根据品牌需求
    纯文字版式（text + shape + decorate，零图片）完全合法，别为了凑元素硬加图片。
 3. 图层必须分开标注：text、shape、picture、mask_picture、decorate、bg。
 4. 每个元素给出：类型、内容、坐标(x,y,w,h，单位英寸)、字体/颜色/字号、素材需求描述。
-5. 所有文字都登记为独立 text 元素；禁止把文字写进图片素材。
+5. 所有标题先规划为可编辑原生 text（包括封面）；禁止以图片代替标题或把艺术字写入素材需求。仅用户明确点名的标题效果由后续专用步骤处理。其他文字也登记为独立 text。
 6. 配色只允许从品牌VI色里取（外加黑白），列出主色/辅助色/强调色。
 7. 只输出一个 JSON 对象（不要 markdown 代码块，不要注释），结构严格遵循下方契约。
 
 输出JSON字段：vi、pages[].page_name、pages[].bg、pages[].elements[]、pages[].decorations[]（可为空）。
 
 """ + PRIMITIVE_CATALOG + "\n" + LAYOUT_CONTRACT
+
+
+def _toc_constraint(brief: dict) -> str:
+    if brief.get('toc_required') is False:
+        return '全册明确不设目录，不得用目录替换任何正文页。'
+    if brief.get('toc_required') is True:
+        return '全册需要目录；遵循指定页序，只在负责该页的批次生成一次。'
+    return '不按页数增设目录；优先保持已指定的逐页提纲。'
 
 
 def planner_user(brief: dict[str, Any]) -> str:
@@ -191,7 +200,7 @@ def planner_user(brief: dict[str, Any]) -> str:
         "行业：" + str(brief.get("industry", "")) + "\n"
         "VI色值：" + json.dumps(brief.get("vi", {}), ensure_ascii=False) + "\n"
         "这一页主题与创意版式：" + str(brief.get("creative", "")) + "\n"
-        + recipe_line
+        + recipe_line + _toc_constraint(brief) + "\n"
         + "文案：" + json.dumps(brief.get("copy", {}), ensure_ascii=False) + "\n"
         "调性：" + str(brief.get("tone", "")) + "\n"
         "页数：" + str(brief.get("pages", 1)) + "\n"
@@ -224,7 +233,7 @@ def rework_user(layout: dict, issues: list[str]) -> str:
 MULTI_PAGE_RULES = """
 【多页分批规划】本次只规划下面列出的几页，其余页由别的批次负责，不要替它们生成内容。
 - 输出的 pages 数组长度必须严格等于本次要求的页数，顺序一一对应，page_name 用给定页名。
-- 每页必须严格按该页的 creative / style 构图；不同页之间构图不能重复。
+- 按各页 creative / style 构图；同类内容或横向比较页优先复用骨架，标题、图片、指标的位置保持一致。仅在内容结构不同或用户明确要求变化时换构图，不因版式重复而返修。
 - 每页至少 3 个元素：主标题 text、副标题或正文 text、以及视觉元素
   （picture / mask_picture / shape / decorate / branch / scrim 均可）。明确写「纯文字 / 零图片 / 无图」的页
   只用 text + shape + decorate，禁止塞图片。
@@ -251,6 +260,7 @@ def page_batch_user(brief: dict, batch: list[dict], start_index: int, total: int
         "VI色值：" + json.dumps(brief.get("vi", {}), ensure_ascii=False),
         "全局调性：" + str(brief.get("tone", "")),
         "全册创意与适用范围（逐页例外优先）：" + str(brief.get("creative", "")),
+        _toc_constraint(brief),
         f"整套共 {total} 页；本次只规划第 {start_index + 1} ~ {start_index + len(batch)} 页，"
         f"共 {len(batch)} 页。",
         "可用字体（font.family 只能从这里选）：" + "、".join(preferred_fonts()),
@@ -298,6 +308,11 @@ ASSET_DECORATION_HINT = (
 def asset_prompt(description: str, kind: str = "photo",
                  tone: str | None = None, industry: str | None = None) -> str:
     """素材提示词与版式无关，只按「元素用途」和 brief 调性拼接。"""
+    if kind == 'emblem':
+        target, _ = json.JSONDecoder().raw_decode(description)
+        return (f"仅绘制一个独立品牌徽标。图案及风格：{target['design']}。"
+                '徽标居中、轮廓完整清晰，独立图形之外留空。不做页面缩略图、版面、拼贴或场景摄影；'
+                '不要文字、数字、水印或其他标志。')
     if kind == 'storefront':
         # 只投射照片本身的拍摄特征；即便描述含店名，或返修意见引用错字，也不复述它们。
         shot, _ = json.JSONDecoder().raw_decode(description)

@@ -54,8 +54,7 @@ RENDERER = os.getenv("A2A_RENDERER", "libreoffice").strip().lower()
 # 生图候选数（best-of-N）：默认 1 保持原有链路不变；>1 时每个 asset 生成 N 张候选，
 # 落盘到 02_assets/candidates/ 并生成联系表，默认采用第 1 张，用户可用 pick_assets.py 改选。
 IMAGE_CANDIDATES = max(1, int(os.getenv("A2A_IMAGE_CANDIDATES", "1")))
-# 封面主标题艺术字：默认开启，作为生成流程的最后一步自动套用（只把标题换成艺术字图，
-# 其余封面元素保持原生可编辑）。关掉则交付纯原生文本框版本。
+# 艺术字能力总开关，不是用户授权：开启后仍须用户明确要求；关闭则始终保留原生标题。
 COVER_TITLE_ART = os.getenv("A2A_COVER_TITLE_ART", "1").lower() in {"1", "true", "yes", "on"}
 COVER_TITLE_ART_N = max(1, int(os.getenv("A2A_COVER_ART_N", "2")))  # 艺术字候选数（默认2，取第1张）
 

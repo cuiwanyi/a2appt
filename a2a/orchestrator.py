@@ -55,6 +55,53 @@ def _unchanged_blockers(previous, current):
     return list(issues) if all(i in new and old[i] == new[i] for i in pages) else []
 
 
+def _build_input_hash(ctx):
+    """快照取 Builder 留在上下文中的有效布局；素材按内容而非路径、mtime 或清单判断。"""
+    layout = ctx.layout
+    ids = set()
+    for page in layout['pages']:
+        if page['bg'].get('image'):
+            ids.add(page['bg']['image'])
+        for el in page['elements']:
+            if el['type'] == 'picture':
+                ids.add(el['asset_id'])
+            elif el['type'] == 'mask_picture':
+                from ppt.schema import page_item_targets, storefront_photos
+                from ppt.slicing import mask_geometry
+                aid = el['asset_id']
+                if aid in page_item_targets(page, storefront_photos(page)):
+                    ids.add(aid)  # 即使已切片，此类条目仍需用原图复核。
+                for cell in mask_geometry(el):
+                    key = f"{aid}__{cell['index']}"
+                    path = ctx.assets.get(key)
+                    if path and Path(path).is_file():
+                        ids.add(key)
+                    else:
+                        ids.add(aid)  # Builder 没有该格切片时回退到母图。
+    hashes = {}
+    for aid in ids:
+        path = ctx.assets.get(aid)
+        try:
+            if path:
+                with open(path, 'rb') as stream:
+                    hashes[aid] = hashlib.file_digest(stream, 'sha256').hexdigest()
+            else:
+                hashes[aid] = None
+        except FileNotFoundError:
+            hashes[aid] = None
+        except OSError:
+            return None  # 无法证明没有变化，必须重新构建并审核。
+    data = json.dumps([layout, hashes], sort_keys=True, ensure_ascii=False).encode('utf-8')
+    return hashlib.sha256(data).hexdigest()
+
+
+def _save_review(ctx, report, attempt, repairs):
+    report['asset_rework'] = repairs.copy()
+    data = json_dump(report)
+    ctx.path('04_review.json').write_text(data, encoding='utf-8')
+    ctx.path(f'04_review_attempt{attempt}.json').write_text(data, encoding='utf-8')
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -65,7 +112,10 @@ class Orchestrator:
         max_rework: int | None = None,
         transport: str = "inproc",
         name: str | None = None,
+        user_request: str | dict | None = None,
     ):
+        from services.cover_art_intent import requested_cover_style
+        self.cover_art_style = requested_cover_style(user_request)
         self.brief = brief
         self.mock = config.MOCK if mock is None else mock
         self.llm = llm or (MockLLM(brief) if self.mock else LLMClient())
@@ -104,7 +154,34 @@ class Orchestrator:
                 self.bus.register(cls(self.ctx, self.bus))
             self.endpoints = {}
         (self.root / "agent_cards.json").write_text(json_dump(self.bus.cards()), encoding="utf-8")
-        (self.root / "brief.json").write_text(json_dump(brief), encoding="utf-8")
+        archived = dict(brief, cover_title_art=self.cover_art_style or False)
+        (self.root / "brief.json").write_text(json_dump(archived), encoding="utf-8")
+
+    def _should_apply_cover_art(self) -> bool:
+        """只对真正的封面页套主标题艺术字,不因'是第一页'就套。
+
+        单页(或明确标注的骨架页)若没有封面信号,标题保持原生文本框;
+        否则数据看板/金句等页会被巨型艺术字盖住刊头与正文。
+        """
+        layout = self.ctx.layout or {}
+        pages = layout.get("pages") or []
+        if not self.cover_art_style or not pages:
+            return False
+        first = pages[0]
+        name = str(first.get("page_name", ""))
+        specs = self.brief.get('page_specs') or [{}]
+        text = name + ' ' + str(specs[0].get('name') or '')
+        if re.search(r'目录|内页|数据看板|封底|致谢', text):
+            return False
+        # 明确不是封面:骨架 ID 标注为其它页型(如 09_dashboard、20_qa)
+        m = re.match(r"^\s*(\d{2})_([a-z0-9]+)", name)
+        if m and m.group(1) != "01":
+            return False
+        # 明确的封面信号
+        if re.search(r"封面|扉页|cover", text, re.I):
+            return True
+        # 页数/页码不是封面身份；单页可由该页的构图要求确认。
+        return len(pages) == 1 and bool(re.search(r'封面|扉页|\bcover\b', str(self.brief.get('creative') or ''), re.I))
 
     def _apply_cover_title_art(self) -> dict | None:
         """准备候选版式；由常规 Builder 构建，并在交付前审核同一份文件。"""
@@ -119,7 +196,7 @@ class Orchestrator:
             return None
         title = str(t["content"]).strip()
         color = str((t.get("font") or {}).get("color") or "#EDE6D6")
-        prompt = title_prompt(title)
+        prompt = title_prompt(title, self.cover_art_style)
 
         out_dir = self.root / "06_cover_art"
         cand_dir = out_dir / "candidates"
@@ -131,7 +208,7 @@ class Orchestrator:
             raw = cand_dir / f"raw_{i + 1}.png"
             rgba = cand_dir / f"title_rgba_{i + 1}.png"
             self.llm.image(prompt, raw)
-            matte_and_recolor(raw, rgba, color)
+            matte_and_recolor(raw, rgba, color, style=self.cover_art_style)
             raw_pngs.append(rgba)
             manifest.append({"asset_id": "cover_title_art", "path": str(rgba),
                              "candidates": [str(rgba)], "kind": "title_art",
@@ -161,11 +238,11 @@ class Orchestrator:
         shutil.copy2(chosen, art_asset)
         self.ctx.assets['cover_title_art'] = str(art_asset)
         self.ctx.layout = layout
-        return {"title": title, "candidates": n, "gallery": str(gallery)}
+        return {"title": title, "style": self.cover_art_style, "candidates": n, "gallery": str(gallery)}
 
-    def _rework(self, report, attempt):
+    def _rework(self, report, attempt, **options):
         from a2a.repair_queue import dispatch
-        return dispatch(self, report, attempt)
+        return dispatch(self, report, attempt, **options)
 
     def _repair_assets(self, old_layout, findings, attempt, *, targeted_only=False):
         from ppt.schema import asset_requests
@@ -189,12 +266,12 @@ class Orchestrator:
         for finding in findings:
             idx = finding['page'] - 1
             page = layout['pages'][idx]
-            if finding.get('reason') == 'storefront':
+            if finding.get('reason') in ('storefront', 'emblem'):
                 ids = {aid for aid, req in new.items() if req['page'] == idx + 1}
                 named = finding.get('asset_ids')
                 if (not isinstance(named, list) or len(named) != 1 or not isinstance(named[0], str) or named[0] not in ids
-                        or new[named[0]]['kind'] != 'storefront'):
-                    blocked.append(f'第{idx+1}页缺少唯一的门面照片目标，未换图')
+                        or new[named[0]]['kind'] != finding['reason']):
+                    blocked.append(f"第{idx+1}页缺少唯一的 {finding['reason']} 素材目标，未换图")
                     continue
             else:
                 ids = {aid for aid, req in new.items() if req['page'] == idx+1 and aid != 'cover_title_art'}
@@ -243,7 +320,8 @@ class Orchestrator:
             prompt = asset_prompt(source, req['kind'],
                                   tone=req.get('tone'), industry=req.get('industry'))
             if aid in alternatives:
-                prompt += '。更换机位与景别重新拍摄，不沿用上次的构图；保留指定主体与留白区。'
+                prompt += ('。重新绘制清晰的独立图形，保留指定配色和轮廓。' if req['kind'] == 'emblem'
+                           else '。更换机位与景别重新拍摄，不沿用上次的构图；保留指定主体与留白区。')
             after, applied = None, False
             try:
                 self.llm.image(prompt, out, size=req['size'])
@@ -324,7 +402,7 @@ class Orchestrator:
                 stage=2,
             )
 
-            if config.COVER_TITLE_ART and not self.mock and self.ctx.layout:
+            if config.COVER_TITLE_ART and not self.mock and self.ctx.layout and self._should_apply_cover_art():
                 try:
                     art = self._apply_cover_title_art()
                     if art:
@@ -368,9 +446,7 @@ class Orchestrator:
                     stop_reason = {'code':'no_progress', 'attempt':attempt, 'issues':stalled,
                                    'detail':'返修后审查输入及阻塞项未变，停止重复返修，保留候选稿'}
                     report['stop_reason'] = stop_reason
-                report['asset_rework'] = repairs.copy()
-                self.ctx.path('04_review.json').write_text(json_dump(report), encoding='utf-8')
-                self.ctx.path(f'04_review_attempt{attempt}.json').write_text(json_dump(report), encoding='utf-8')
+                _save_review(self.ctx, report, attempt, repairs)
                 if outage:
                     self.bus.emit('review.outage', **stop_reason)
                     break
@@ -385,18 +461,45 @@ class Orchestrator:
                     self.bus.emit("rework.converged", attempt=attempt,
                                   note="本轮自检无阻塞项，提前结束返修循环")
                     break
-                if attempt > self.max_rework:
+                if len(repairs) >= self.max_rework:
                     self.bus.emit("rework.exhausted", attempt=attempt,
                                   max_rework=self.max_rework)
                     break
-                self.bus.emit("rework.request", attempt=attempt, hints=self.ctx.rework_hints)
-                attempt += 1
+                reviewed_input = _build_input_hash(self.ctx)
                 previous_review = deepcopy(report)
-                repair = self._rework(report, attempt)
-                repairs.append(repair)
-                self.bus.emit('rework.assets', **repair)
-                layout_file = self.ctx.path('01_layout_rework.json')
-                layout_file.write_text(json_dump(self.ctx.layout), encoding='utf-8')
+                retry_only = None
+                while True:
+                    repair_attempt = len(repairs) + 2  # 1 是初稿；返修序号可与下一次实际构建序号不同。
+                    self.bus.emit('rework.request', attempt=attempt, repair_attempt=repair_attempt, hints=self.ctx.rework_hints)
+                    repair = dict(attempt=repair_attempt, review_attempt=attempt, input_before=reviewed_input)
+                    repairs.append(repair)
+                    try:
+                        repair.update(self._rework(report, repair_attempt, ledger=ledger, retry_only=retry_only))
+                    except Exception as exc:
+                        repair['error'] = f'{type(exc).__name__}: {exc}'
+                        _save_review(self.ctx, report, attempt, repairs)
+                        raise
+                    after = repair['input_after'] = _build_input_hash(self.ctx)
+                    self.bus.emit('rework.assets', **repair)
+                    layout_file = self.ctx.path('01_layout_rework.json')
+                    layout_file.write_text(json_dump(self.ctx.layout), encoding='utf-8')
+                    if reviewed_input is None or reviewed_input != after:
+                        attempt += 1
+                        break  # 变更或无法证实相同：构建后才能重新判定。
+                    retry_only = set(map(tuple, repair.get('retryable', [])))
+                    if retry_only and len(repairs) < self.max_rework:
+                        continue  # 沿用同一审核证据，只处理有具体替代策略的项。
+                    stop_reason = dict(code='no_progress', attempt=attempt, repair_attempt=repair_attempt,
+                                       issues=list(report.get('issues', [])),
+                                       detail='有效布局与引用素材未变，无可继续执行的返修，保留已审核候选稿')
+                    report.update(ok=False, stop_reason=stop_reason)
+                    report['repair_limits'] = list(dict.fromkeys(limit for r in repairs if r['review_attempt'] == attempt
+                                                                for limit in r['limits']))
+                    _save_review(self.ctx, report, attempt, repairs)
+                    self.bus.emit('rework.no_progress', **stop_reason)
+                    break
+                if stop_reason:
+                    break
 
             if report.get('ok') and self.ctx.deck_path and Path(self.ctx.deck_path).exists():
                 final = self.root / 'deliverable.pptx'

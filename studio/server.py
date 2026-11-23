@@ -12,12 +12,16 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-from run_paths import ARCHIVE, LEGACY_STUDIO, RUNS
+from run_paths import ARCHIVE, DRAFT_DECK, FIRST_DRAFT, LEGACY_STUDIO, RUNS
+
+DRAFT_FILE = f'{FIRST_DRAFT}/{DRAFT_DECK}'
+DRAFT_IMAGE = rf'{FIRST_DRAFT}/slide_([1-9][0-9]*)_approx\.png'
+PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'), '/index.html': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
 
 
 def checked(path, base):
-    if not path.resolve().is_relative_to(base.resolve()):
+    if not path.is_relative_to(base) or path.resolve() != base.resolve() / path.relative_to(base):
         raise ValueError('无效路径')
     return path
 
@@ -88,14 +92,25 @@ def describe(p, detail=False):
     brief, summary, job = [read(p, n) for n in ('brief.json', '05_summary.json', 'studio_job.json')]
     state = job.get('state')
     status = state if state in ('active','passed','failed') else 'passed' if summary.get('ok') is True else 'failed' if summary.get('ok') is False or (p/'error.txt').is_file() else 'partial'
-    shots, kind = previews(p)
+    terminal = status in ('passed', 'failed')
+    draft = checked(p / DRAFT_FILE, p)
+    has_draft = draft.is_file()
+    draft_shots = []
+    if has_draft:
+        draft_shots = sorted((f for f in draft.parent.iterdir()
+                              if re.fullmatch(DRAFT_IMAGE, f.relative_to(p).as_posix()) and checked(f, p).is_file()),
+                             key=lambda f: int(f.stem.split('_')[1]))
+    shots, kind = previews(p) if terminal or not has_draft else ([], '')
+    showing_draft = has_draft and not shots
+    if showing_draft:
+        shots, kind = draft_shots, '首稿（待审核）· 近似版式预览'
     try:
         pages = max(0, int(brief.get('pages') or (summary.get('review_summary') or {}).get('pages') or 0))
     except (ValueError,TypeError):
         pages = 0
     title = (brief.get('copy') if isinstance(brief.get('copy'),dict) else {}).get('title') or job.get('title') or brief.get('brand') or p.name
     updated = max([p.stat().st_mtime] + [(p / n).stat().st_mtime for n in ('trace.jsonl','studio_job.json','05_summary.json') if (p / n).is_file()])
-    row = dict(id=public_id(p), title=str(title), brand=str(brief.get('brand') or ''), pages=pages, updated=updated, status=status, cover=asset_url(p,shots[0]) if shots else None, source='history' if p.parent!=RUNS else 'studio' if job else 'cli')
+    row = dict(id=public_id(p), title=str(title), brand=str(brief.get('brand') or ''), pages=pages, updated=updated, status=status, draftReady=has_draft, cover=asset_url(p,shots[0]) if shots else None, source='history' if p.parent!=RUNS else 'studio' if job else 'cli')
     if not detail:
         return row
     review = read(p,'04_review.json')
@@ -119,7 +134,11 @@ def describe(p, detail=False):
         issues.append('结构检查未报告问题；尚无逐页视觉评审结论。')
     deck = checked(p/'deliverable.pptx',p)
     stages = [('需求整理','brief.json'),('版式规划','01_layout.json'),('素材准备','02_assets/manifest.json'),('构建演示稿','03_deck.pptx'),('质量审查','04_review.json'),('交付文件','deliverable.pptx')]
-    return dict(row,previews=[asset_url(p,f) for f in shots],previewKind=kind,stages=[dict(label=l,done=(p/n).is_file()) for l,n in stages],issues=issues,download=asset_url(p,deck) if deck.is_file() and status!='active' else None,canRebuild=status in ('passed','failed') and (p/'01_layout.json').is_file() and (p/'02_assets').is_dir(),brief=brief,mode=summary.get('mode') or job.get('mode') or '')
+    return dict(row, previews=[asset_url(p,f) for f in shots], previewKind=kind, showingDraft=showing_draft,
+                draftDownload=asset_url(p, draft) if has_draft else None,
+                draftPreviews=[asset_url(p,f) for f in draft_shots],
+                stages=[dict(label=l, done=(p/n).is_file() and (n != 'deliverable.pptx' or status == 'passed')) for l,n in stages],
+                issues=issues, download=asset_url(p,deck) if deck.is_file() and terminal else None,canRebuild=status in ('passed','failed') and (p/'01_layout.json').is_file() and (p/'02_assets').is_dir(),brief=brief,mode=summary.get('mode') or job.get('mode') or '')
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -167,9 +186,16 @@ class Handler(BaseHTTPRequestHandler):
                 p=lookup(q.get('id',[''])[0])
                 if u.path=='/api/run': return self.reply(describe(p,True))
                 name=q.get('name',[''])[0]
-                if name=='deliverable.pptx':
-                    filename=quote(str(describe(p)['title'])[:70]+'.pptx',safe='')
-                    return self.send_file(checked(p/name,p),'application/vnd.openxmlformats-officedocument.presentationml.presentation',[('Content-Disposition',"attachment; filename=deck.pptx; filename*=UTF-8''"+filename)])
+                if name in ('deliverable.pptx', DRAFT_FILE):
+                    row = describe(p)
+                    if name == 'deliverable.pptx' and row['status'] not in ('passed', 'failed'):
+                        raise FileNotFoundError
+                    suffix = '（首稿·待审核）' if name == DRAFT_FILE else '（候选稿）' if row['status'] == 'failed' else ''
+                    filename = quote(str(row['title'])[:70] + suffix + '.pptx', safe='')
+                    fallback = DRAFT_DECK if name == DRAFT_FILE else 'deck.pptx'
+                    return self.send_file(checked(p/name,p), PPTX_MIME, [('Content-Disposition', f"attachment; filename={fallback}; filename*=UTF-8''{filename}")])
+                if re.fullmatch(DRAFT_IMAGE, name) and checked(p / DRAFT_FILE, p).is_file():
+                    return self.send_file(checked(p/name,p),'image/png')
                 if name=='04_layout_preview.png' or re.fullmatch(r'04_screenshots/slide_\d+_(?:real|approx)\.png',name):
                     return self.send_file(checked(p/name,p),'image/png')
             raise FileNotFoundError

@@ -73,21 +73,24 @@ def cover_elements(ctx) -> list[dict]:
             pos = el["position"]
             if el["type"] in {"text", "shape"}:
                 pos["w"] = min(pos["w"], ctx["wash_w"] - pos["x"] - 0.25)
-    art = ctx.get("art_pos")
-    if art:
-        els.append({"type": "picture", "asset_id": "title_art",
-                    "position": art, "layer": "text"})
+    c = _pal(ctx)
+    copy_ = spec.get('copy') or {}
+    title = copy_.get('title') or spec.get('name') or '品牌画册'
     if not els:
-        c = _pal(ctx)
-        copy_ = spec.get("copy") or {}
         els = [
-            _text(copy_.get("title") or spec.get("name") or "品牌画册",
-                  X0, 2.0, 7.0, 1.2, 44, c["primary"], bold=True, family="宋体"),
             _text(copy_.get("subtitle") or "", X0, 3.3, 7.0, 0.5, 18, c["secondary"]),
             _bar(X0, 1.6, 5.9, c["secondary"]),
             _text(copy_.get("body") or "", X0, 4.1, 6.5, 1.0, 13, c["soft"]),
             *_page_no_els(ctx),
         ]
+    existing = next((e for e in els if e.get('type') == 'text' and e.get('content') == title), None)
+    if ctx.get('art_pos'):
+        if existing is not None:
+            els.remove(existing)
+        els.append({'type': 'picture', 'asset_id': 'title_art', 'position': ctx['art_pos'], 'layer': 'text'})
+    elif existing is None:
+        els.append(_text(title, X0, 2.0, min(7.0, ctx['wash_w'] - X0 - 0.25), 1.2,
+                         44, c['primary'], bold=True, family='宋体'))
     return els
 
 

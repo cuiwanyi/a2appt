@@ -10,8 +10,10 @@ import random
 
 from a2a.base import BaseAgent
 from a2a.types import AgentSkill, Task, data_part, file_part, json_dump, text_part
-from ppt.image_layout import full_bleed_rule, photo_spec, text_only
+from ppt.image_layout import full_bleed_rule, localize_photo, photo_spec, text_only
+from ppt.item_images import ItemBindingError, repair_item_bindings
 from ppt.schema import bind_page_assets, clean_closing_title, normalize_layout
+from services.background_subject import preflight_background_subjects
 from services.opening_focus import OPENING_LIMIT, POSITIONS
 from services.mock_data import build_mock_layout
 from services.prompts import (
@@ -170,6 +172,8 @@ class PlannerAgent(BaseAgent):
                     scrim['element_id'] = f'p{i+1}_background_scrim'
                     page['elements'].append(scrim)
                     page['elements'].sort(key=lambda e: e['z'])
+            elif rule is False:
+                localize_photo(page, spec, i, layout['vi'], self.ctx.llm.chat_json)
             page['photo_required'] = rule is True
 
         if not rework and len(layout["pages"]) > 1:
@@ -184,9 +188,20 @@ class PlannerAgent(BaseAgent):
 
         clean_closing_title(layout)
         from ppt.toc_diagram import reconcile_contents
-        for note in reconcile_contents(layout, specs):
+        for note in reconcile_contents(layout, specs, brief=self.ctx.brief):
             self.log("目录与实际页序不一致，已校准", **note)
 
+        try:
+            layout = preflight_background_subjects(layout, self.ctx.brief, self.ctx.llm)
+        except ItemBindingError as exc:
+            if self.ctx.mock:
+                raise
+            # 单独留存被拒绝的输入，便于离线复现；不当作可用于构建的 01_layout.json。
+            stage = 'rework' if rework else 'initial'
+            self.ctx.path(f'01_binding_input_{stage}.json').write_text(json_dump(layout), encoding='utf-8')
+            # 保留全部布局、图片和文案，仅允许规划器修复逐项绑定，不覆盖已有有效页。
+            layout = repair_item_bindings(layout, self.ctx.llm, str(exc))
+            layout = preflight_background_subjects(layout, self.ctx.brief, self.ctx.llm)
         self.ctx.layout = layout
         name = "01_layout_rework.json" if rework else "01_layout.json"
         out = self.ctx.path(name)

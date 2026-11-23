@@ -13,11 +13,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-Style = Literal["calligraphy", "3d_gradient", "minimal_serif"]
+Style = Literal["calligraphy", "3d_gradient", "minimal_serif", "metallic"]
 
 STYLE_LABELS = {
     "calligraphy": "书法水墨海报（飞白笔锋 + 印章 + 留白）",
     "3d_gradient": "3D 渐变立体海报（几何背景 + 强构成）",
+    "metallic": "金属艺术字封面（拉丝笔画 + 局部反光）",
     "minimal_serif": "极简宋体海报（大留白 + 单色 + 摄影感）",
 }
 
@@ -36,6 +37,11 @@ _STYLE_BODIES: dict[str, str] = {
         "Design it like a premium tech/corporate poster: the lettering is the hero, with a small "
         "underline accent; background features abstract gradient geometric folded-paper shapes, "
         "a subtle skyline or light streaks, and small elegant text 「{subtitle}」. "
+    ),
+    "metallic": (
+        "Main hero title in sculpted metallic lettering with brushed metal facets, precise edges "
+        "and restrained specular highlights: 「{title}」. Keep the background matte and uncluttered; "
+        "set 「{subtitle}」 as a small, plain secondary line. "
     ),
     "minimal_serif": (
         "Main hero title in large refined thin Song-style serif Chinese lettering with a fine "

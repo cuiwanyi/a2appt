@@ -47,7 +47,7 @@ class AssetAgent(BaseAgent):
         ids = [req['asset_id'] for req in reqs]
         return (all(re.fullmatch(r'[\w-]+', aid) and not Path(aid + '.png').is_reserved() for aid in ids)
                 and len({aid.casefold() for aid in ids}) == len(ids)
-                and all(r['kind'] in {'bg', 'photo', 'storefront', 'item', 'hero', 'cell'} for r in reqs))
+                and all(r['kind'] in {'bg', 'photo', 'storefront', 'emblem', 'item', 'hero', 'cell'} for r in reqs))
 
     def _images(self, reqs, n_cand):
         parallel = self._can_parallelize(reqs, n_cand)
@@ -107,6 +107,8 @@ class AssetAgent(BaseAgent):
                     future.result()
                 sources[target.name] = 'mock' if self.ctx.mock else 'llm'
             except Exception as exc:  # noqa: BLE001
+                if req['kind'] == 'emblem' and not self.ctx.mock:
+                    raise RuntimeError(f'{aid} 徽标生成失败，不能用占位图代替') from exc
                 if req.get('item_target') and not self.ctx.mock:
                     raise RuntimeError(f'{aid} 单条插图生成失败，不能用占位图代替') from exc
                 limited = (getattr(getattr(exc, 'response', None), 'status_code', None) == 429

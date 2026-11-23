@@ -21,7 +21,8 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
         return 237, 230, 214
 
 
-def matte_and_recolor(src: str | Path, dst: str | Path, hex_color: str) -> tuple[int, int]:
+def matte_and_recolor(src: str | Path, dst: str | Path, hex_color: str, *,
+                      style: str = 'calligraphy') -> tuple[int, int]:
     im = Image.open(src).convert("RGB")
     a = np.asarray(im).astype(np.float32)
     mn = a.min(axis=2)
@@ -33,6 +34,10 @@ def matte_and_recolor(src: str | Path, dst: str | Path, hex_color: str) -> tuple
     col[..., 0] = r0 + (255 - r0) * 0.14 * t
     col[..., 1] = g0 + (255 - g0) * 0.14 * t
     col[..., 2] = b0 + (255 - b0) * 0.14 * t
+    if style == 'metallic':
+        # 只抠白底，不把笔画内的金属反光和色阶压成单一 VI 色。
+        col = a
+        alpha = np.clip(dist / 18.0, 0, 1) * 255
     rgba = np.dstack([np.clip(col, 0, 255), alpha]).astype(np.uint8)
     out = Image.fromarray(rgba, "RGBA")
     bbox = out.getbbox()
@@ -42,11 +47,15 @@ def matte_and_recolor(src: str | Path, dst: str | Path, hex_color: str) -> tuple
     return out.size
 
 
-def title_prompt(title: str) -> str:
+def title_prompt(title: str, style: str = 'calligraphy') -> str:
+    treatment = {
+        'calligraphy': 'Chinese calligraphy in deep forest-green ink, brush strokes with flying-white texture',
+        'metallic': 'Sculpted metallic lettering with brushed metal facets and controlled specular highlights',
+        'lettering': 'Custom editorial lettering with refined letterforms and a solid dark fill',
+    }[style]
     return (
-        f"A premium Chinese calligraphy-art logotype of EXACTLY these characters: 「{title}」. "
-        "Elegant deep forest-green ink brush strokes with strong slanted strokes and flying-white "
-        "texture, refined artistic typography, centered, large, occupying the middle band of the "
+        f"A premium logotype of EXACTLY these characters: 「{title}」. {treatment}, "
+        "centered, large, occupying the middle band of the "
         "image, on a PURE SOLID WHITE (#FFFFFF) flat background with even lighting, no shadows, "
         "no background gradient, no watermark, no frame, no other text. "
         f"The {len(title)} characters must be written 100% correct with complete strokes, no gibberish, "

@@ -275,7 +275,7 @@ def _normalize_element(raw: dict, idx: int, page_idx: int, vi: dict) -> dict:
         "layer": str(raw.get("layer") or DEFAULT_LAYER[etype]).lower(),
         "note": str(raw.get("note") or ""),
     }
-    if etype in {'picture', 'text'} and raw.get('item_key'):
+    if etype in {'picture', 'mask_picture', 'text'} and raw.get('item_key'):
         el['item_key'] = str(raw['item_key']).strip()
     if el["layer"] not in LAYER_ORDER:
         el["layer"] = DEFAULT_LAYER[etype]
@@ -310,6 +310,8 @@ def _normalize_element(raw: dict, idx: int, page_idx: int, vi: dict) -> dict:
 
     elif etype == "picture":
         el["asset_id"] = str(raw.get("asset_id") or f"pic_p{page_idx + 1}_{idx + 1}")
+        if raw.get('asset_kind') in ('emblem', 'icon', 'decoration'):
+            el['asset_kind'] = raw['asset_kind']
 
     elif etype == "decorate":
         prim = str(raw.get("primitive") or raw.get("shape") or "ring").lower()
@@ -394,6 +396,37 @@ def style_photo_metric_cards(bg: dict, elements: list[dict]) -> None:
                 text["font"]["color"] = "#20160F"
 
 
+def _lift_card_graphics(elements: list[dict]) -> None:
+    """仅修复明确的卡底与前景图反序，不跨过其他相交的遮挡物。"""
+    cards = [e for e in elements if e['type'] == 'shape' and e['shape'] == 'rect'
+             and e['layer'] == 'decoration' and e['fill'] and e['fill_opacity'] == 1
+             and re.search(r'底板|卡片背景|卡底|\b(?:card background|backplate)\b', e['note'], re.I)]
+    if not cards:
+        return
+    for pic in elements:
+        if pic['type'] != 'picture' or pic['layer'] != 'picture':
+            continue
+        desc = ' '.join((pic['asset_id'].replace('_', ' '), pic['content'], pic['note']))
+        if (not re.search(r'图标|图表|环形图|饼图|柱状图|折线图|\b(?:icon|chart|donut)\b', desc, re.I)
+                or re.search(r'摄影|照片|背景图|底图|\b(?:photo\w*|background|bg)\b', desc, re.I)):
+            continue
+        p = pic['position']
+        axes = (('x', 'w'), ('y', 'h'))
+        # 坐标已规范化至千分之一英寸；只消除浮点加法误差。
+        hosts = [c for c in cards if all(c['position'][a] <= p[a] and
+                 round(p[a] + p[d], 3) <= round(c['position'][a] + c['position'][d], 3)
+                 for a, d in axes)]
+        if not hosts:
+            continue
+        # 保留遮罩、局部装饰等原叠放关系；不抢到 overlay 或文字上方。
+        if any(pic['z'] < e['z'] <= LAYER_ORDER['decoration'] and e not in hosts and
+               all(e['position'][a] < round(p[a] + p[d], 3) and
+                   p[a] < round(e['position'][a] + e['position'][d], 3) for a, d in axes)
+               for e in elements):
+            continue
+        pic['z'] = (LAYER_ORDER['decoration'] + LAYER_ORDER['overlay']) / 2
+
+
 def normalize_layout(raw: Any, brief: dict | None = None) -> dict:
     brief = brief or {}
     raw = raw if isinstance(raw, dict) else {}
@@ -473,7 +506,8 @@ def normalize_layout(raw: Any, brief: dict | None = None) -> dict:
         # 逐项插图属于前景内容：渐变只保护文字，不能顺手洗淡独立小图。
         if bg['type'] == 'image' and any(e['type'] == 'scrim' for e in elements):
             try:
-                item_ids = set(item_targets({'elements': elements}))
+                page = {'elements': elements}
+                item_ids = set(page_item_targets(page, storefront_photos(page)))
             except ValueError:
                 item_ids = set()
             if len(item_ids) >= 2:
@@ -481,6 +515,7 @@ def normalize_layout(raw: Any, brief: dict | None = None) -> dict:
                     if el['type'] == 'picture' and el['asset_id'] in item_ids:
                         el['layer'] = 'overlay'
                         el['z'] = LAYER_ORDER['overlay']
+        _lift_card_graphics(elements)
         elements.sort(key=lambda e: e["z"])  # 稳定排序，图层顺序即写入顺序
         pages.append(
             {
@@ -536,19 +571,44 @@ def clean_closing_title(layout: dict) -> None:
             title["content"] = "明天见"
 
 
+def emblem_pictures(page: dict) -> dict:
+    # 旧版没有 asset_kind，只识别素材描述开头明确以徽标为主体的 picture。
+    marks = {}
+    for el in page['elements']:
+        if el['type'] != 'picture' or el.get('asset_id') == 'cover_title_art':
+            continue
+        subject = re.split(r'[，,。；;\n]', el.get('content', ''), maxsplit=1)[0].strip()
+        legacy_mark = (not el.get('item_key') and re.search(r'徽标$|徽章$|品牌标志$|品牌标识$|\b(?:emblem|logo)$', subject, re.I)
+                       and not re.search(r'不要|禁止|不含|无徽标|没有|含有|带有|印有|拍摄|照片|门头', subject))
+        if el.get('asset_kind') == 'emblem' or legacy_mark:
+            marks[el['asset_id']] = el
+    return marks
+
+
+def emblem_design(el: dict) -> str:
+    # 首个短句是主体；后续只收图形本身的描述，不照抄布局、文案或「品牌提供原件」的来源声明。
+    text = re.split(r'本页主题[：:]|文案语境|标题[：:]|纠正截图中的错误|返修[：:]|\n', el.get('content', ''), maxsplit=1)[0]
+    clauses = [s.strip() for s in re.split(r'[，,。；;]', text) if s.strip()]
+    design = clauses[:1]
+    for s in clauses[1:]:
+        if re.search(r'页眉|页脚|目录|页面|标题|文案|排版|右接|左接', s):
+            break
+        if '原件' not in s:
+            design.append(s)
+    return '，'.join(design) or '单个无字品牌图形'
+
+
 def storefront_photos(page: dict) -> dict:
     """仅按独立照片自身的拍摄描述识别，不拿页名、文件名或邻近文案判定。"""
-    return {e['asset_id']: e for e in page['elements'] if e['type'] == 'picture'
+    marks = emblem_pictures(page)
+    return {e['asset_id']: e for e in page['elements'] if e['type'] == 'picture' and e['asset_id'] not in marks
             and not e.get('item_key') and e.get('asset_id') != 'cover_title_art' and re.search(
                 r'门面|门头|店面外观|店铺外观|门店外观|店铺入口|门店入口|店铺正立面|\b(?:storefront|shopfront)\b',
                 e.get('content', ''), re.I)}
 
 
 def page_item_targets(page: dict, storefronts: dict) -> dict:
-    # 独立门面照片不能因紧邻正文而被旧版行绑定策略当成条目插图。
-    if storefronts:
-        page = dict(page, elements=[e for e in page['elements'] if e.get('asset_id') not in storefronts])
-    return item_targets(page)
+    return item_targets(page, standalone=storefronts.keys() | emblem_pictures(page).keys())
 
 
 def asset_requests(layout: dict, brief: dict | None = None) -> list[dict]:
@@ -569,13 +629,13 @@ def asset_requests(layout: dict, brief: dict | None = None) -> list[dict]:
 
     def add(aid: str, prompt: str, kind: str, size: str = "1536x1024", target=None, *, page_context=True) -> None:
         key = aid.casefold()
-        if key in folded and (target is not None or kind == 'storefront' or key in item_ids):
+        if key in folded and (target is not None or kind in ('storefront', 'emblem') or key in item_ids):
             raise ValueError(f'逐图审核的图片不能复用背景或其他素材 ID：{aid}')
         if aid in seen:
             return
         seen.add(aid)
         folded.add(key)
-        if target is not None or kind == 'storefront':
+        if target is not None or kind in ('storefront', 'emblem'):
             item_ids.add(key)
         reqs.append({
             "asset_id": aid, "prompt": (json.dumps(target, ensure_ascii=False) if target is not None
@@ -594,6 +654,7 @@ def asset_requests(layout: dict, brief: dict | None = None) -> list[dict]:
         title = str(copy.get("title") or largest.get("content") or theme)
         excerpt = str(copy.get("body") or " / ".join(texts))[:240]
         context = f"本页主题：{theme}；标题：{title}；文案语境（不入画）：{excerpt}。"
+        emblems = emblem_pictures(page)
         storefronts = storefront_photos(page)
         targets = page_item_targets(page, storefronts)
         if page['bg']['type'] == 'image' and len(targets) >= 2:
@@ -629,6 +690,10 @@ def asset_requests(layout: dict, brief: dict | None = None) -> list[dict]:
             add(page["bg"]["image"] or "bg_global", description, "bg")
         for el in page["elements"]:
             if el["type"] == "picture":
+                if el['asset_id'] in emblems:
+                    design = json.dumps({'design': emblem_design(el)}, ensure_ascii=False)
+                    add(el['asset_id'], design, 'emblem', size='1024x1024', page_context=False)
+                    continue
                 if el['asset_id'] in storefronts:
                     # 只传受控的取景特征；不把可能含店名、标题的整段摄影文案交给模型。
                     cues = ('平视', '正立面', '居中', '店门', '暖光', '橱窗', '长椅', '街面',
@@ -641,7 +706,8 @@ def asset_requests(layout: dict, brief: dict | None = None) -> list[dict]:
             elif el["type"] == "mask_picture":
                 mask = el["mask"]
                 if mask["continuous"]:
-                    add(el["asset_id"], el["content"] or "品牌主视觉", "hero")
+                    target = targets.get(el['asset_id'])
+                    add(el["asset_id"], el["content"] or "品牌主视觉", 'item' if target else 'hero', target=target)
                 else:
                     prompts = mask["cell_prompts"]
                     ids = mask["asset_ids"] or [

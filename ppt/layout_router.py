@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import re
 
+from ppt.toc_policy import toc_intent
+
 FIRST_LAYOUT = "cover"      # 首页默认：封面
 LAST_LAYOUT = "thanks"      # 末页默认：致谢
 FALLBACK_LAYOUT = "editorial"
@@ -52,10 +54,6 @@ STRUCT_KEYS = (
 
 # 自然语言信号：(正则, 版式, 权重, 说明)。权重高者优先。
 SIGNAL_RULES: list[tuple[str, str, int, str]] = [
-    (r"不要目录|不做目录|无需目录|去掉目录|不用目录", "__NO_TOC__", 999,
-     "明确排除目录"),
-    (r"目录|CONTENTS|contents|章节一览|章节导览|章节列表", "creative_toc", 100,
-     "出现目录/章节导航信号"),
     (r"致谢|感谢观看|谢谢观看|THANKS|Thanks|明天见|下次见|再会|敬请期待",
      "thanks", 96, "出现致谢/告别信号"),
     (r"分几点|几点来讲|每一点|每个点|每点都?配图|每个分支都?配图|"
@@ -98,7 +96,10 @@ def route_layout(spec: dict, page_no: int, total_pages: int,
                  *, trace: bool = False) -> dict:
     """由内容决定版式。trace=True 时附带所有命中信号，便于调试。"""
     text = _collect_text(spec)
+    intent = toc_intent(spec)
     hits: list[tuple[int, str, str]] = []
+    if intent is True:
+        hits.append((100, 'creative_toc', '本页明确要求目录/章节导览'))
     for pattern, layout, weight, why in SIGNAL_RULES:
         m = re.search(pattern, text)
         if m:
@@ -107,17 +108,18 @@ def route_layout(spec: dict, page_no: int, total_pages: int,
     evidence = [h[2] for h in hits]
 
     # ---- 1. 显式排除 / 指定 ----
-    excludes = {ALIASES.get(str(x).strip().lower(), str(x).strip().lower())
-                for x in (spec.get("exclude") or spec.get("no") or [])}
+    raw_excludes = spec.get('exclude') or spec.get('no') or []
+    if isinstance(raw_excludes, str):
+        raw_excludes = [raw_excludes]
+    excludes = {ALIASES.get(str(x).strip().lower(), str(x).strip().lower()) for x in raw_excludes}
+    if intent is False:
+        excludes.add('creative_toc')
     explicit = spec.get("layout")
     if explicit:
         layout = ALIASES.get(str(explicit).strip().lower(), str(explicit).strip().lower())
-        return {"layout": layout, "reason": f"用户在提示词里指定「{explicit}」",
-                "evidence": evidence, "overridden": True, "excluded": sorted(excludes)}
-
-    neg_toc = any(h[1] == "__NO_TOC__" for h in hits)
-    if neg_toc:
-        excludes.add("creative_toc")
+        if layout not in excludes:
+            return {"layout": layout, "reason": f"用户在提示词里指定「{explicit}」",
+                    "evidence": evidence, "overridden": True, "excluded": sorted(excludes)}
 
     chosen: str | None = None
     reason = ""
@@ -133,14 +135,19 @@ def route_layout(spec: dict, page_no: int, total_pages: int,
     # ---- 3. 自然语言信号 ----
     if not chosen:
         for weight, layout, why in hits:
-            if layout == "__NO_TOC__" or layout in excludes:
+            if layout in excludes:
                 continue
             chosen, reason = layout, why
             break
 
     # ---- 4. 位置默认值（内容信号优先，可被覆盖）----
+    # 少页(<4)属轻量 PPT:不存在可靠的「首页/末页」语义,禁用位置默认,
+    # 一律按内容信号选,无信号用通用图文版式。避免单页同时命中首页封面与末页致谢。
+    # 多页(>=4)才启用画册三段式位置默认,且已被上方内容信号优先覆盖。
     if not chosen:
-        if page_no == 1 and FIRST_LAYOUT not in excludes:
+        if total_pages < 4:
+            chosen, reason = FALLBACK_LAYOUT, "少页：内容信号优先，无信号用通用图文版式（不用位置默认）"
+        elif page_no == 1 and FIRST_LAYOUT not in excludes:
             chosen, reason = FIRST_LAYOUT, "位置默认：第 1 页是封面"
         elif page_no == total_pages and LAST_LAYOUT not in excludes:
             chosen, reason = LAST_LAYOUT, f"位置默认：最后一页（{total_pages}）是致谢"
@@ -166,8 +173,8 @@ def build_registry() -> dict:
     noop = lambda slide, ctx: []  # noqa: E731  统一签名，无分支
     return {
         "cover": {
-            "label": "封面（艺术字 + 品牌宣言 + 落款）",
-            "elements": L.cover_elements, "draw": noop, "needs_art": True,
+            "label": "封面（可编辑主标题 + 品牌宣言 + 落款）",
+            "elements": L.cover_elements, "draw": noop, "needs_art": False,
         },
         "creative_toc": {
             "label": "创意目录（超大斜体数字 + 虚线 + 错落网格）",

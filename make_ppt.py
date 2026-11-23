@@ -17,6 +17,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import config
 from a2a.orchestrator import Orchestrator
@@ -50,11 +51,11 @@ BRIEF_SYSTEM = """你是广告需求整理助手。把用户用自然语言描�
 4. creative 是关键：忠实转写用户想要的构图。**不要默认使用柱状蒙版 / 多柱裁切**，也不要预设任何固定构图；纯文字、居中海报、全幅背景、圆形裁图、多图网格、斜切分栏都同样是合法选择。用户没说版式时，按调性自选一个最稳妥的。
 5. 文案简洁：标题不超过 16 字，正文不超过 60 字。所有文字都会放进 PPT 原生文本框，不要要求把文字画进图片。
 6. pages 默认 1，除非用户明确要几页，最多 8 页。
-7. **多页（pages>1）时必须输出 page_specs 数组**：长度严格等于 pages，按页顺序排列。每页对象含 name（页名）、creative（该页具体构图，写清文字/图片/形状怎么放、要不要形状裁图）、copy（该页独立的 title/subtitle/body/cta）、style（视觉关键词）。用户逐页写的要求必须原样落进对应页的 creative 和 copy；用户没逐页写时，你自行设计 8 种**互不相同**的构图，不要八页长一个样。
+7. **多页（pages>1）时必须输出 page_specs 数组**：长度严格等于 pages，按页顺序排列。每页对象含 name（页名）、creative（该页具体构图，写清文字/图片/形状怎么放、要不要形状裁图）、copy（该页独立的 title/subtitle/body/cta）、style（视觉关键词）。用户逐页写的要求必须原样落进对应页的 creative 和 copy；用户没逐页写时按内容安排。同类门店、产品、季度或连续对比页优先复用同一骨架与字段位置，不为求变化强制换版；若用户要求逐页变化，再按要求设计。标题默认使用可编辑原生文字；不要替用户增加艺术字要求。
 8. 单页（pages=1）时**不要**输出 page_specs 字段。
 9. **画册级结构硬规则（pages>=4 时必须遵守）**：
    - 第 1 页封面：用整幅摄影背景图 + 渐变遮罩洗白标题侧（caption 里写明「摄影背景+渐变遮罩，标题在左/右侧留白」），不要用纯色大色块；
-   - 第 2 页必须是【纯粹的目录页】，页名就叫「目录」，不要与宣言/前言/介绍等任何其它内容合并：creative 写明「目录页，用 toc 原语，编号+章节名+一句话说明，摄影背景+渐变遮罩，目录收在洗白侧」，copy.body 里只列第 3 页至末页各页实际存在的标题与说明，不为凑数新增章节（用「｜」或换行分隔），copy.title 用「目录」；原来想放在这一页的宣言/前言内容顺延到后面的页面；
+   - 不因页数或页码自动添加目录，不把已有正文顺延或替换成目录。用户要求导航，或未给逐页提纲且内容确有章节导航需要时，才安排目录。若要求无目录则不安排。有目录时用 toc，条目只对应目录之后的真实章节；指定位置时按用户位置。
    - 凡是讲【发展历程/成长阶段/roadmap/年份】的页：creative 写明「时间轴 timeline，每个节点要写清这一阶段做了什么、有什么结果」，copy.body 逐条给出「年份：阶段名——具体做了什么、结果/数据」；
    - 结尾页若用横向图片条带，写明「条带图高度≥2英寸，不要压成细条」，否则改用整页摄影背景+渐变遮罩；
    - 文字压在摄影图上的页都要写明「渐变遮罩洗白文字侧、图片焦点在另一侧保持清晰」。
@@ -101,7 +102,7 @@ def normalize_brief(raw: dict, source_text: str = "") -> dict:
     except (TypeError, ValueError):
         pages = 1
 
-    # 多页规格：每页独立的构图与文案，是「多页不重样」的关键数据。
+    # 各页拥有独立的文案；同类页可以共享骨架。
     specs: list[dict] = []
     raw_specs = raw.get("page_specs")
     if isinstance(raw_specs, list):
@@ -113,29 +114,19 @@ def normalize_brief(raw: dict, source_text: str = "") -> dict:
                 "name": str(sp.get("name") or f"第 {i + 1} 页").strip(),
                 "creative": str(sp.get("creative") or "").strip(),
                 "style": str(sp.get("style") or "").strip(),
+                **{k: sp[k] for k in ("layout", "exclude", "toc_required", "layout_recipe") if k in sp},
                 "copy": {k: str(sc.get(k) or "").strip()
                          for k in ("title", "subtitle", "body", "cta")},
             })
-    # 自然语言入口的保险：模型只整理出部分页时，按不同构图方向补齐到目标页数，
-    # 避免「写了要 8 页、实际只出 3 页」。
+    # 补齐缺页不引入新的页面角色，也不为凑页数轮换骨架。
     if pages > 1 and len(specs) < pages:
-        directions = (
-            "封面：整幅摄影背景图 + 渐变遮罩洗白标题侧（scrim），标题放留白侧，焦点图在另一侧清晰保留",
-            "目录页：用 toc 原语做编号目录（编号+章节名+一句话说明），摄影背景+渐变遮罩洗白目录侧",
-            "发展历程：用 branch timeline 时间轴，每个节点写清阶段做了什么、结果/数据，摄影背景+scrim",
-            "左右分栏：左侧洗白放文字，右侧整张摄影图（焦点侧不被 scrim 遮罩）",
-            "居中海报：标题居中、上下装饰线，整幅摄影背景 + 上下渐变遮罩",
-            "多图网格：mask_picture layout=grid 2x2 连续全景裁切，带格间距",
-            "并列要点：用 branch icon_grid，每个要点有标题与具体说明，摄影背景+scrim",
-            "收尾落款：整页摄影背景 + 渐变遮罩 + 居中落款；若用条带图高度≥2英寸不要压细",
-        )
         for i in range(len(specs), pages):
             specs.append({
-                "name": ("目录" if i == 1 else f"第 {i + 1} 页"),
-                "creative": directions[i % len(directions)],
-                "style": "与全局调性一致，但构图与前面各页明显不同",
+                "name": f"第 {i + 1} 页",
+                "creative": "遵照全册设计要求，按本页内容安排构图，同类内容可复用骨架。",
+                "style": "沿用全局调性，便于跨页阅读与比较",
                 "copy": {
-                    "title": ("目录" if i == 1 else (lines[i][:16] if i < len(lines) else title)),
+                    "title": lines[i][:16] if i < len(lines) else title,
                     "subtitle": "",
                     "body": body,
                     "cta": "",
@@ -144,22 +135,37 @@ def normalize_brief(raw: dict, source_text: str = "") -> dict:
     if specs:
         pages = len(specs)
 
+    # copy 除了四个文本字段，还可能是结构化数据（指标、图表等）。
+    # 这些字段要原样保留，否则规划器拿不到数值，页面只剩指标名、数值全丢。
+    copy_out: dict[str, Any] = {
+        "title": title,
+        "subtitle": cs("subtitle", ""),
+        "body": body,
+        "cta": cs("cta", ""),
+    }
+    for key, value in copy.items():
+        if key not in copy_out:
+            copy_out[key] = value
+
     brief = {
         "brand": s("brand", "未命名品牌"),
         "industry": s("industry", "品牌传播"),
         "vi": vi,
         "creative": s("creative", "居中海报：标题居中，上下细线装饰，配一张与主题相关的独立图片；不要求形状裁图。"),
-        "copy": {
-            "title": title,
-            "subtitle": cs("subtitle", ""),
-            "body": body,
-            "cta": cs("cta", ""),
-        },
+        "copy": copy_out,
         "tone": s("tone", "简约 / 克制"),
         "pages": pages,
     }
     if specs:
         brief["page_specs"] = specs
+    # 保留用户的目录约束供审核；正文/标题里的“目录”不是授权。
+    from ppt.toc_policy import toc_intent
+    if source_text and not source_text.lstrip().startswith("{"):
+        intent = toc_intent({"prompt": source_text})
+    else:
+        intent = toc_intent(raw)
+    if intent is not None:
+        brief["toc_required"] = intent
     # 用户直接给了完整 brief 时，保留他想强制指定的版式配方
     if isinstance(raw.get("layout_recipe"), str) and raw["layout_recipe"].strip():
         brief["layout_recipe"] = raw["layout_recipe"].strip()
@@ -243,9 +249,9 @@ def main() -> int:
         if not p.exists():
             print(f"brief 不存在: {p}")
             return 2
-        brief = normalize_brief(json.loads(read_text(p)), "")
+        request_text = read_text(p)
+        brief = normalize_brief(json.loads(request_text), "")
         by_llm = False
-        request_text = "[直接读取结构化 brief] " + str(p)
     else:
         if args.text:
             request_text = args.text.strip()
@@ -268,7 +274,7 @@ def main() -> int:
     show_brief(brief, by_llm)
     llm = client or MockLLM(brief)
     orch = Orchestrator(brief, llm=llm, mock=mock, max_rework=args.max_rework,
-                        transport=args.transport, name=args.name)
+                        transport=args.transport, name=args.name, user_request=request_text)
     (orch.root / "00_request.txt").write_text(request_text, encoding="utf-8")
     print(f'微调后重跑：--brief "{orch.root / "brief.json"}"')
     print(f"[A2A] run_id={orch.run_id}  mode={'mock' if mock else 'live'}  root={orch.root}")
@@ -277,7 +283,7 @@ def main() -> int:
 
     print("\n===== 生成结果 =====")
     print("状态:", "PASS" if summary["ok"] else "FAIL", "| 构建次数:", summary["attempts"],
-          "| 已执行返修:", max(0, summary["attempts"] - 1))
+          "| 已执行返修:", summary["rework_count"])
     print("★ 交付 PPTX:", summary["deliverable"])
     if not summary['ok'] and summary.get('candidate'):
         print('  未通过的候选稿:', summary['candidate'])

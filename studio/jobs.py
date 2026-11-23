@@ -208,7 +208,8 @@ def _run(root, request):
     else:
         brief, _ = make_brief(request['text'], client)
     orch = Orchestrator(brief, llm=client or MockLLM(brief), mock=client is None,
-                        root=root, max_rework=request.get('maxRework', 0))
+                        root=root, max_rework=request.get('maxRework', 0),
+                        user_request=request.get('text', request.get('brief')))
     if mode == 'rebuild':
         orch.ctx.layout, orch.ctx.assets = layout, assets
         for stage, skill in ((3, 'build_pptx'), (4, 'review_deck')):
@@ -245,7 +246,7 @@ def _run(root, request):
 
 def _worker():
     root = Path.cwd().resolve()
-    if root.parent != DATA or not root.name.startswith('studio_'):
+    if root.parent != DATA or not (root / 'studio_input.json').is_file():
         raise ValueError('工作目录不是 Studio 任务')
     meta = _read(root / 'studio_job.json')
     if meta['state'] != 'active':

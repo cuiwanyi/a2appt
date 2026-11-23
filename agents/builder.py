@@ -2,6 +2,11 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
+from pathlib import Path
+
+from run_paths import DRAFT_DECK, FIRST_DRAFT
+from ppt.preview import render_layout_preview
 
 from a2a.base import BaseAgent
 from a2a.types import AgentSkill, Task, data_part, file_part, json_dump, text_part
@@ -66,6 +71,26 @@ class BuilderAgent(BaseAgent):
         attempt_copy = self.ctx.path(f"03_deck_attempt{attempt}.pptx")
         shutil.copy2(out, attempt_copy)
         self.ctx.deck_path = str(out)
+        if attempt == 1 and not (self.ctx.root / FIRST_DRAFT).exists():
+            # 发布目录是一次提交点：下载和截图不会读到半份文件，返修不再进入此分支。
+            target = self.ctx.root / FIRST_DRAFT
+            with tempfile.TemporaryDirectory(dir=self.ctx.root, prefix='.draft-') as work:
+                stage = Path(work) / FIRST_DRAFT
+                stage.mkdir()
+                shutil.copyfile(attempt_copy, stage / DRAFT_DECK)
+                try:
+                    for i, page in enumerate(layout['pages'], 1):
+                        render_layout_preview(dict(layout, pages=[page]), self.ctx.assets,
+                                              stage / f'slide_{i}_approx.png', scale=80)
+                except Exception as exc:
+                    # 近似预览失败不应阻止 PPTX 发布和后续实际渲染。
+                    for image in stage.glob('*.png'):
+                        image.unlink()
+                    self.log('首稿近似预览不可用，可下载 PPTX 查看', reason=str(exc))
+                stage.rename(target)
+            self.bus.emit('draft.ready', agent=self.NAME, attempt=1, status='pending_review',
+                          pptx=str(target / DRAFT_DECK))
+            print(f'[A2A] 首稿已生成（待审核，非交付稿）：{target / DRAFT_DECK}', flush=True)
 
         report = {
             "pptx": str(out),

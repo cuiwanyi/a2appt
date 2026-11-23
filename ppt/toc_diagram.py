@@ -8,25 +8,43 @@ from __future__ import annotations
 from pptx.enum.text import MSO_ANCHOR
 
 from .branch_diagram import _text, _set_line
+from .toc_policy import is_contents_page, toc_intent
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Inches
 
 _ALIGN = {"left": "left", "center": "center", "right": "right"}
 
 
-def reconcile_contents(layout, specs=()):
-    """Bind the opening contents to the assembled deck, never to a suggested quota."""
+def reconcile_contents(layout, specs=(), *, brief=None):
+    """按真实后续页校对目录；不把普通编号正文改成目录。"""
+    import re
+    allow_conversion = toc_intent(brief or {}) is not False
+    pages = layout.get('pages', [])
+    notes = []
+    # 独立交付的单页目录没有可链接的后续页；条目是展示文案，不是不存在的页码。
+    if len(pages) == 1:
+        return notes
+    for idx, page in enumerate(pages):
+        spec = specs[idx] if idx < len(specs) else {}
+        native = any(e['type'] == 'toc' for e in page.get('elements', []))
+        intent = toc_intent(spec)
+        name = str(spec.get('name') or '').strip()
+        assigned = bool(name and not re.fullmatch(r'第\s*\d+\s*页', name))
+        if native or (allow_conversion and (intent is True or
+                (intent is None and not assigned and is_contents_page(page)))):
+            notes.extend(_reconcile_page(pages, idx, specs))
+    return notes
+
+
+def _reconcile_page(pages, idx, specs):
     import re
     import unicodedata
 
     def key(value):
         return ''.join(c for c in unicodedata.normalize('NFKC', value).casefold() if c.isalnum())
 
-    pages = layout.get('pages', [])
-    if len(pages) < 3:
-        return []
     notes = []
-    page = pages[1]
+    page = pages[idx]
 
     # 模型或本地兜底可能把目录写成一只文本框；没有 toc 原语就没有列数和目标页可言。
     if not any(e['type'] == 'toc' for e in page['elements']):
@@ -46,19 +64,21 @@ def reconcile_contents(layout, specs=()):
                 continue
             wash = next((e.get('wash') for e in page['elements'] if e['type'] == 'scrim'), '')
             page['elements'][i] = {
-                'type': 'toc', 'element_id': el.get('element_id', 'p2_index').replace('_text', '_toc'),
+                'type': 'toc', 'element_id': el.get('element_id', f'p{idx+1}_index').replace('_text', '_toc'),
                 'title': '目录', 'cols': 2, 'items': items[:12], 'position': dict(el['position']),
                 'layer': 'text', 'z': el.get('z', 5), 'align': el.get('align', 'left'), 'wash': wash,
             }
-            notes.append({'toc_page': 2, 'converted_from_text': True})
+            notes.append({'toc_page': idx + 1, 'converted_from_text': True})
             break
 
     for toc in [e for e in page['elements'] if e['type'] == 'toc']:
         old = toc.get('items', [])
         unused = list(range(len(old)))
         targets, mapping = [], {}
-        page_numbers = bool(old and str(old[0].get('num', '')).lstrip('0') == '3')
-        for i, content_page in enumerate(pages[2:], start=2):
+        page_numbers = bool(old and str(old[0].get('num', '')).lstrip('0') == str(idx + 2))
+        for i, content_page in enumerate(pages[idx + 1:], start=idx + 1):
+            if is_contents_page(content_page):
+                continue
             name = content_page.get('page_name', '').strip()
             spec = specs[i] if i < len(specs) else {}
             texts = [e for e in content_page.get('elements', []) if e['type'] == 'text' and e.get('content', '').strip()]
@@ -69,7 +89,7 @@ def reconcile_contents(layout, specs=()):
             if key(proposed) in written:
                 aliases.add(key(proposed))
             match = next((j for j in unused if key(old[j]['label']) in aliases), None)
-            num = i + 1 if page_numbers else i - 1
+            num = i + 1 if page_numbers else len(targets) + 1
             if match is not None:
                 unused.remove(match)
                 item = dict(old[match]); mapping[match + 1] = num
@@ -79,7 +99,7 @@ def reconcile_contents(layout, specs=()):
             item.update(num=f'{num:02d}', target_page=i + 1)
             targets.append(item)
         if [i['label'] for i in old] != [i['label'] for i in targets]:
-            notes.append({'toc_page': 2, 'removed': [old[j]['label'] for j in unused],
+            notes.append({'toc_page': idx + 1, 'removed': [old[j]['label'] for j in unused],
                           'resolved': [i['label'] for i in targets]})
         # 分组标注必须跟随有效项；原稿范围可能超出实际保留下来的章节数。
         # 只改独立的“标签 + 两位范围”文本，不碰含斜杠的页码或正文。
@@ -111,7 +131,7 @@ def reconcile_contents(layout, specs=()):
             else:
                 page['elements'].remove(e)
         # 明确写出的列数优先；行数按最终项数推导，不能沿用原稿的 4 行空格。
-        toc_spec = specs[1] if len(specs) > 1 else {}
+        toc_spec = specs[idx] if idx < len(specs) else {}
         request = str(toc_spec.get('creative', '')) + str(toc_spec.get('style', ''))
         digits = {'两': 2, '三': 3, '四': 4, '五': 5, '六': 6}
         match = re.search(r'(两|三|四|五|六|\d)\s*列', request)

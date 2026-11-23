@@ -77,7 +77,7 @@ def main() -> int:
     mock = args.mock or config.MOCK
     llm = MockLLM(brief) if mock else LLMClient()
     orch = Orchestrator(brief, llm=llm, mock=mock, max_rework=args.max_rework,
-                        transport=args.transport)
+                        transport=args.transport, user_request=brief if args.brief else None)
     print(f"[A2A] run_id={orch.run_id}  mode={'mock' if mock else 'live'}  "
           f"transport={args.transport}  root={orch.root}")
     if orch.endpoints:
@@ -87,7 +87,8 @@ def main() -> int:
     summary = orch.run()
 
     print("\n===== 编排结果 =====")
-    print("状态:", "PASS" if summary["ok"] else "FAIL", "| 返修轮次:", summary["attempts"])
+    print("状态:", "PASS" if summary["ok"] else "FAIL", "| 构建次数:", summary["attempts"],
+          "| 已执行返修:", summary["rework_count"])
     print("交付 PPTX:", summary["deliverable"])
     print("版式 JSON:", summary["layout"])
     print("素材目录:", summary["assets_dir"])

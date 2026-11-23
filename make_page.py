@@ -36,6 +36,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import config
 from services.llm import LLMClient
 from services.cover_title_art import matte_and_recolor, title_prompt
 from ppt.focus_scrim import prepare_background, make_adaptive_scrim
@@ -161,7 +162,7 @@ PAGE_CONTENT = {
         "name": "封面",
         "opening_scene": "a single ceramic pour-over dripper with coffee grounds and a thin "
                          "wisp of steam on dark walnut, no extra cups",
-        "art_title": "山屿咖啡",
+        "copy": {"title": "山屿咖啡"},
         "art_color": INK,
         "elements": [
             {"type": "text", "content": "SANYU COFFEE  ·  SINCE 2016",
@@ -354,7 +355,8 @@ def build_page(page_no: int, reuse: bool = False, *,
                layout_override: str | None = None,
                exclude: list[str] | None = None,
                tag: str | None = None,
-               content_override: dict | None = None) -> dict:
+               content_override: dict | None = None,
+               cover_art_style: str | None = None) -> dict:
     spec = copy.deepcopy(PAGE_CONTENT[page_no])
     if content_override:
         # 整体替换，不能 update：否则旧页残留的 chapters/creative_toc 等结构化字段
@@ -382,6 +384,8 @@ def build_page(page_no: int, reuse: bool = False, *,
         src = WORK / f"page_{page_no:02d}" / "assets"
         if src.exists():
             for f in src.glob("*.png"):
+                if f.name.startswith(('art_raw', 'title_art')):
+                    continue
                 dst = assets_dir / f.name
                 if not dst.exists():
                     shutil.copy2(f, dst)
@@ -392,17 +396,19 @@ def build_page(page_no: int, reuse: bool = False, *,
 
     llm = LLMClient()
     raw_bg = assets_dir / "bg_raw.png"
-    art_raw = assets_dir / "art_raw.png"
-    art_rgba = assets_dir / "title_art.png"
-
-    # ---- 0.5 封面先做艺术字（用户流程：艺术字在配图之前完成）----
+    # 模板和路由只决定页型，不能授权；显式 CLI/API 参数才启用。
     art_size = None
-    if plan["needs_art"]:
-        title = spec.get("art_title") or spec.get("copy", {}).get("title") or spec["name"]
+    if config.COVER_TITLE_ART and route['layout'] == 'cover' and cover_art_style:
+        title = spec.get('copy', {}).get('title') or spec['name']
+        prompt = title_prompt(title, cover_art_style)
+        color = spec.get('art_color', INK)
+        key = hashlib.sha256((prompt + color).encode()).hexdigest()[:16]
+        art_raw = assets_dir / f'art_raw_{key}.png'
+        art_rgba = assets_dir / f'title_art_{key}.png'
         if not (reuse and art_rgba.exists() and art_rgba.stat().st_size > 20_000):
             print(f"[page {page_no}] 先做艺术字「{title}」 ...", flush=True)
-            gen_image(llm, title_prompt(title), art_raw, "艺术字")
-            matte_and_recolor(art_raw, art_rgba, spec.get("art_color", INK))
+            gen_image(llm, prompt, art_raw, "艺术字")
+            matte_and_recolor(art_raw, art_rgba, color, style=cover_art_style)
         with Image.open(art_rgba) as im:
             art_size = im.size
 
@@ -491,7 +497,7 @@ def build_page(page_no: int, reuse: bool = False, *,
     }
 
     # ---- 3. 艺术字位置（图已在第 0.5 步生成；此处只按焦点后的安全区定位）----
-    if plan["needs_art"] and art_size:
+    if art_size:
         aw, ah = art_size
         x0 = 0.82
         max_w = max(4.5, min(8.0, wash_w - x0 - 0.30))
@@ -593,6 +599,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--page", type=int)
     ap.add_argument("--reuse", action="store_true")
+    ap.add_argument('--cover-art', choices=['lettering', 'calligraphy', 'metallic'],
+                    help='明确将封面主标题做成艺术字图片（默认保留原生文本）')
     ap.add_argument("--layout", help="显式指定版式（覆盖内容路由）")
     ap.add_argument("--exclude", action="append", help="排除某版式，可多次")
     ap.add_argument("--tag", help="独立产物目录后缀，不覆盖已验收的页")
@@ -624,7 +632,7 @@ def main() -> int:
         borrow["_borrowed_from"] = args.content_from
     r = build_page(page_no, reuse=args.reuse,
                    layout_override=args.layout, exclude=args.exclude,
-                   tag=args.tag, content_override=borrow)
+                   tag=args.tag, content_override=borrow, cover_art_style=args.cover_art)
     print("\n★ 版式:", r["layout"], "|", r["route"]["reason"])
     print("★ 单页成品:", r["pptx"])
     print("★ 渲染截图:", r["shot"])

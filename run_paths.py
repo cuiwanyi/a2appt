@@ -7,6 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 ARCHIVE = ROOT / 'workspace'
 LEGACY_STUDIO = ROOT / 'studio' / 'runs'
+FIRST_DRAFT = '03_first_draft'
+DRAFT_DECK = 'first_draft.pptx'
 
 
 def external_runs(path):

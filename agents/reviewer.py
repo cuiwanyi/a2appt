@@ -20,7 +20,7 @@ from inspect import signature
 from pathlib import Path
 
 from PIL import Image
-from ppt.schema import page_item_targets, storefront_photos
+from ppt.schema import emblem_design, emblem_pictures, page_item_targets, storefront_photos
 import shutil
 
 import config
@@ -161,6 +161,21 @@ def _visual_rules(page, targets=None):
         critical.update({'image_filled', 'image_relevance', 'focus_clear'})
         system += ('\n另加两项必检规则：image_relevance（实际摄影主体是否符合本页原始文案及场景；'
                    '不符时在该 check 的 asset_ids 数组列出错图 ID），focus_clear（文字或组件没有盖住摄影焦点）。')
+    decorations = [{k: e.get(k) for k in ('element_id','asset_id','position')} for e in page.get('elements', [])
+                   if e['type'] == 'picture' and e.get('layer') in ('overlay', 'decoration')]
+    if decorations:
+        system += ('\n若 no_overlap 仅发现一张独立装饰图片与原生文字相叠，check.target_id 填装饰元素 ID，'
+                   'detail 说明截图中叠压的位置，并用引号引用受影响的原文。不能确认或存在多个问题时不要猜 ID。'
+                   '可核对的装饰对象（位置单位英寸）：' + json.dumps(decorations, ensure_ascii=False))
+    emblems = emblem_pictures(page)
+    if emblems:
+        rules = ['emblem_match:' + aid for aid in emblems]
+        critical.update(rules)
+        system += ('\n独立徽标只在对应专属规则判定，不在 image_filled/image_relevance 重复扣分。规则：'
+                   + ', '.join(rules) + '。逐一看指定成稿裁图，不按原图或整页缩览猜测。每条 check 带 asset_id 和 state：'
+                   'match（单个图形且轮廓、配色、风格符合要求）、thumbnail（整页缩略图或拼版）、'
+                   'wrong_design（图形、用色或风格不符）、missing（空白）、unreadable（不能辨认）。'
+                   '只有 match 可 ok=true；detail 说明框内实际可见轮廓和颜色。')
     signs = storefront_photos(page)
     if signs:
         rules = ['storefront_sign:' + aid for aid in signs]
@@ -205,6 +220,19 @@ def _validate_visual(result, critical):
     returned = [c['rule'] for c in checks if c['rule'].startswith('item_relevance:')]
     if set(returned) != item_rules or len(returned) != len(item_rules):
         raise ValueError('逐项视觉证据重复或引用未知素材')
+    expected = {r for r in critical if r.startswith('emblem_match:')}
+    emblem_checks = [c for c in checks if c['rule'].startswith('emblem_match:')]
+    if {c['rule'] for c in emblem_checks} != expected:
+        raise ValueError('徽标证据引用了未知素材')
+    emblem_ids = {r.partition(':')[2] for r in expected}
+    for c in checks:
+        if c['rule'] == 'image_relevance' and not c['ok'] and emblem_ids.intersection(c.get('asset_ids') or []):
+            raise ValueError('徽标只能按专属裁图规则归因，不得重复派发')
+    for c in emblem_checks:
+        if (c.get('asset_id') != c['rule'].partition(':')[2]
+                or c.get('state') not in ('match', 'thumbnail', 'wrong_design', 'missing', 'unreadable')
+                or c['ok'] != (c['state'] == 'match')):
+            raise ValueError('徽标判定与素材 ID 或可见状态不一致')
     sign_rules = {r for r in critical if r.startswith('storefront_sign:')}
     returned = [c['rule'] for c in checks if c['rule'].startswith('storefront_sign:')]
     if set(returned) != sign_rules or len(returned) != len(sign_rules):
@@ -226,6 +254,7 @@ class _PageReview:
     user: str = ''
     critical: set = field(default_factory=set)
     images: list = field(default_factory=list)
+    emblem_crops: dict = field(default_factory=dict)
     native_inputs: list[bytes] = field(default_factory=list)
     options: dict = field(default_factory=dict)
     fingerprint: str | None = None
@@ -251,6 +280,18 @@ def _page_screenshots(images, count):
         else:
             slots[index] = path
     return slots
+
+
+def _crop_emblem(screenshot, position, out):
+    # 只用本轮成稿像素，不从素材原图或布局近似图补证。
+    with Image.open(screenshot) as image:
+        sx, sy = image.width / config.SLIDE_W_IN, image.height / config.SLIDE_H_IN
+        x, y, w, h = (position[k] for k in 'xywh')
+        box = (round(x*sx), round(y*sy), round((x+w)*sx), round((y+h)*sy))
+        if not (0 <= box[0] < box[2] <= image.width and 0 <= box[1] < box[3] <= image.height):
+            raise ValueError('成稿徽标框为空或越界')
+        image.crop(box).save(out)
+        return box
 
 
 def _is_limited(exc):
@@ -363,12 +404,12 @@ class ReviewerAgent(BaseAgent):
         attempt = int(task.metadata.get("attempt", 1))
         layout = self.ctx.layout or {}
         self.log("开始自检", attempt=attempt, pptx=self.ctx.deck_path)
-        report = inspect(self.ctx.deck_path, layout, attempt=attempt)
+        report = inspect(self.ctx.deck_path, layout, attempt=attempt, brief=self.ctx.brief)
 
         # ---- 1b. 画册级结构硬规则（仅真实流水线；驱动返修，修复用户明确要的目录/遮罩/历程说明/条带图） ----
         if not self.ctx.mock:
             from ppt.inspector import brochure_rule_issues
-            brochure = brochure_rule_issues(layout)
+            brochure = brochure_rule_issues(layout, brief=self.ctx.brief)
             if brochure:
                 report["issues"].extend(brochure)
                 self.log("画册级规则未达标", count=len(brochure), items=brochure)
@@ -470,6 +511,16 @@ class ReviewerAgent(BaseAgent):
                         break
                     visual_inputs.append(raw)
                     user += f'\n第{len(visual_inputs)}张输入是门面原图 {aid}；截图中的图片框（英寸）：{photo["position"]}'
+                for ordinal, (aid, el) in enumerate(emblem_pictures(page).items(), 1):
+                    crop = self.ctx.path('04_screenshots', f'attempt{attempt}', f'emblem_p{idx}_{ordinal}.png')
+                    try:
+                        box = _crop_emblem(img, el['position'], crop)
+                    except (KeyError, TypeError, OSError, ValueError) as exc:
+                        reason = f'无法裁取成稿徽标 {aid}：{exc}'
+                        break
+                    visual_inputs.append(str(crop))
+                    job.emblem_crops[aid] = dict(path=str(crop), pixel_box=box)
+                    user += f'\n第{len(visual_inputs)}张是 {aid} 的最终渲染框裁图；本徽标目标：{emblem_design(el)}。'
                 job.system, job.user, job.critical, job.images = system, user, critical, visual_inputs
                 if regions:
                     job.options['max_tokens'] = 5000
@@ -514,7 +565,10 @@ class ReviewerAgent(BaseAgent):
                     if blocking:
                         visual_hints.extend(f'第{idx}页：{h}' for h in vr['rework_hints'])
                 for c in blockers:
-                    if c['rule'].startswith('storefront_sign:'):
+                    if c['rule'].startswith('emblem_match:'):
+                        image_repairs.append({'page': idx, 'asset_ids': [c['asset_id']], 'reason': 'emblem',
+                                              'detail': c['detail']})
+                    elif c['rule'].startswith('storefront_sign:'):
                         aid = c['rule'].split(':', 1)[1]
                         image_repairs.append({'page': idx, 'asset_ids': [aid], 'reason': 'storefront',
                                               'detail': c['detail']})
@@ -531,6 +585,8 @@ class ReviewerAgent(BaseAgent):
                                               'detail': c['detail']})
             if regions:
                 overlay_reviews.append(dict(page=idx, **(decision if vr['status'] == 'ok' else {'reason': 'unverified'})))
+            if job.emblem_crops:
+                vr['emblem_crops'] = job.emblem_crops
             reviews.append(dict(vr, page_index=idx, screenshot=img, reused=job.reused,
                                 review_input_hash=job.fingerprint if job.response is not None else None))
 
